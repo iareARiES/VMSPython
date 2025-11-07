@@ -34,6 +34,7 @@ opencv-python>=4.8.0      # Computer vision library
 onnxruntime>=1.16.0       # ONNX Runtime for AI inference
 numpy>=1.24.0             # Numerical computing
 Pillow>=10.0.0            # Image processing
+google-generativeai>=0.3.0 # Google Gemini API for query parsing (optional - fallback parser available)
 
 # ===== GUI FRAMEWORK =====
 PySide6>=6.6.0            # Qt6 framework for modern GUI

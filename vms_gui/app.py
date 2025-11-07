@@ -4,10 +4,13 @@ Main VMS Client application.
 
 import sys
 import cv2
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QDialog
+from pathlib import Path
+from datetime import datetime
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QDialog, QFileDialog
 
 from .detection import DetectionEngine
-from .gui import TopBar, BottomBar, ModelConfigPanel, VideoDisplay
+from .detection.detection_database import DetectionDatabase
+from .gui import TopBar, BottomBar, ModelConfigPanel, VideoDisplay, VideoPlayer, ChatBot, ResultsPanel
 
 
 class VMSClientApp(QMainWindow):
@@ -21,6 +24,9 @@ class VMSClientApp(QMainWindow):
         # Initialize detection engine
         self.detection_engine = DetectionEngine()
         
+        # Initialize detection database
+        self.detection_db = DetectionDatabase()
+        
         # SOS tracking
         self.sos_settings = {
             "sos_unknown_face_enabled": False,
@@ -33,6 +39,9 @@ class VMSClientApp(QMainWindow):
         self.known_face_count = 0
         self.class_counts = {}  # {class_name: current_count} for class-based SOS
         self.last_known_faces = set()  # Track known faces to avoid duplicate alerts
+        
+        # Current mode: "liveview" or "playback"
+        self.current_mode = "liveview"
         
         # Setup GUI
         self.setup_ui()
@@ -52,26 +61,35 @@ class VMSClientApp(QMainWindow):
         self.top_bar = TopBar(self)
         main_layout.addWidget(self.top_bar)
         
-        # Main content area
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
+        # Connect tab switching
+        self.top_bar.liveview_tab.clicked.connect(self.on_liveview_tab_clicked)
+        self.top_bar.playback_tab.clicked.connect(self.on_playback_tab_clicked)
         
-        # Left sidebar - Model configuration
+        # Main content area - will be updated based on mode
+        self.content_layout = QHBoxLayout()
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(0)
+        
+        # Left sidebar - Model configuration (same for both modes)
         self.model_panel = ModelConfigPanel(self.detection_engine, self)
         self.model_panel.setMaximumWidth(300)
         self.model_panel.setMinimumWidth(250)
-        content_layout.addWidget(self.model_panel)
+        self.content_layout.addWidget(self.model_panel)
         
-        # Center - Video display
-        self.video_display = VideoDisplay(self.detection_engine, self)
-        content_layout.addWidget(self.video_display, 1)
+        # Center and Right panels - will be created based on mode
+        self.video_display = None
+        self.video_player = None
+        self.results_panel = None
+        self.chatbot = None
         
-        main_layout.addLayout(content_layout)
-        
-        # Bottom bar
+        # Bottom bar (created before setup_liveview_mode so it can be accessed)
         self.bottom_bar = BottomBar(self)
         main_layout.addWidget(self.bottom_bar)
+        
+        main_layout.addLayout(self.content_layout)
+        
+        # Create LiveView mode components (after bottom_bar is created)
+        self.setup_liveview_mode()
         
         # Connect bottom bar buttons
         self.bottom_bar.start_btn.clicked.connect(self.start_detection)
@@ -87,9 +105,258 @@ class VMSClientApp(QMainWindow):
         self.model_panel.sos_settings_changed.connect(self.on_sos_settings_changed)
         
         # Connect video display for notifications
-        self.video_display.known_face_detected.connect(self.on_known_face_detected)
-        self.video_display.parent_app = self  # Set reference for SOS checking
+        if self.video_display:
+            self.video_display.known_face_detected.connect(self.on_known_face_detected)
+            self.video_display.parent_app = self  # Set reference for SOS checking
+        
         self.bottom_bar.custom_height_spin.valueChanged.connect(self.on_custom_resolution_changed)
+    
+    def setup_liveview_mode(self):
+        """Setup LiveView mode UI."""
+        # Remove playback components if they exist
+        if self.video_player:
+            self.video_player.setParent(None)
+            self.video_player = None
+        if self.results_panel:
+            self.results_panel.setParent(None)
+            self.results_panel = None
+        if self.chatbot:
+            self.chatbot.setParent(None)
+            self.chatbot = None
+        
+        # Create LiveView components
+        if not self.video_display:
+            self.video_display = VideoDisplay(self.detection_engine, self)
+            self.video_display.known_face_detected.connect(self.on_known_face_detected)
+            self.video_display.parent_app = self
+        
+        # Add to layout
+        self.content_layout.addWidget(self.video_display, 1)
+        
+        # Show/hide bottom bar
+        self.bottom_bar.setVisible(True)
+    
+    def setup_playback_mode(self):
+        """Setup PlayBack mode UI."""
+        # Remove liveview components if they exist
+        if self.video_display:
+            self.video_display.setParent(None)
+            self.video_display = None
+        
+        # Hide bottom bar
+        self.bottom_bar.setVisible(False)
+        
+        # Create PlayBack components
+        if not self.video_player:
+            self.video_player = VideoPlayer(self.detection_engine, self)
+            self.video_player.frame_processed.connect(self.on_video_frame_processed)
+        
+        if not self.results_panel:
+            self.results_panel = ResultsPanel(self)
+        
+        if not self.chatbot:
+            self.chatbot = ChatBot(self)
+            self.chatbot.query_submitted.connect(self.on_chatbot_query)
+        
+        # Create center container for video player and chatbot
+        center_container = QWidget()
+        center_layout = QVBoxLayout(center_container)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        
+        # Video player (takes most space)
+        center_layout.addWidget(self.video_player, 1)
+        
+        # Chatbot at bottom
+        center_layout.addWidget(self.chatbot)
+        
+        # Add center container and results panel to main layout
+        self.content_layout.addWidget(center_container, 1)
+        self.content_layout.addWidget(self.results_panel, 0)
+        self.results_panel.setMaximumWidth(300)
+        self.results_panel.setMinimumWidth(250)
+    
+    def on_liveview_tab_clicked(self):
+        """Handle LiveView tab click."""
+        if not self.top_bar.liveview_tab.isChecked():
+            # If unchecking, don't allow it - keep it checked
+            self.top_bar.liveview_tab.setChecked(True)
+            return
+        self.top_bar.playback_tab.setChecked(False)
+        self.switch_mode("liveview")
+    
+    def on_playback_tab_clicked(self):
+        """Handle PlayBack tab click."""
+        if not self.top_bar.playback_tab.isChecked():
+            # If unchecking, don't allow it - keep it checked
+            self.top_bar.playback_tab.setChecked(True)
+            return
+        self.top_bar.liveview_tab.setChecked(False)
+        self.switch_mode("playback")
+    
+    def switch_mode(self, mode):
+        """Switch between LiveView and PlayBack modes."""
+        if mode == self.current_mode:
+            return
+        
+        self.current_mode = mode
+        
+        # Clear content layout (but keep model panel)
+        # Remove all widgets except model panel
+        items_to_remove = []
+        for i in range(self.content_layout.count()):
+            item = self.content_layout.itemAt(i)
+            if item and item.widget() and item.widget() != self.model_panel:
+                items_to_remove.append(item.widget())
+        
+        for widget in items_to_remove:
+            widget.setParent(None)
+        
+        if mode == "liveview":
+            self.setup_liveview_mode()
+        else:  # playback
+            self.setup_playback_mode()
+    
+    def on_video_frame_processed(self, frame, detections):
+        """Handle processed video frame."""
+        if self.video_player and len(detections) > 0:
+            # Add to results panel only if there are detections
+            time_seconds = self.video_player.get_current_time()
+            video_path = self.video_player.get_video_path()
+            
+            # Draw detections on frame for saving
+            frame_with_detections = frame.copy()
+            for det in detections:
+                x1, y1, x2, y2 = det["bbox"]
+                conf = det["confidence"]
+                cls_name = det["class"]
+                recognized_name = det.get("recognized_name")
+                
+                if recognized_name:
+                    color = (0, 255, 0) if recognized_name != "Unknown" else (0, 165, 255)
+                else:
+                    color = (255, 0, 0) if conf > 0.7 else (74, 158, 255)
+                
+                cv2.rectangle(frame_with_detections, (x1, y1), (x2, y2), color, 2)
+                label = f"{recognized_name or cls_name} {conf:.0%}"
+                cv2.putText(frame_with_detections, label, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # Get model names used
+            model_names = list(set([det.get("model", "unknown") for det in detections]))
+            
+            # Save to database
+            if video_path:
+                self.detection_db.save_detection(
+                    video_path=video_path,
+                    timestamp=time_seconds,
+                    detections=detections,
+                    frame=frame_with_detections,
+                    model_names=model_names
+                )
+            
+            # Add to results panel
+            self.results_panel.add_result(frame, time_seconds, detections)
+    
+    def on_chatbot_query(self, query_text, parsed_query):
+        """Handle chatbot query."""
+        if not parsed_query.get("valid"):
+            self.chatbot.add_response("Could not understand the query. Please try again.")
+            return
+        
+        action = parsed_query.get("action")
+        class_name = parsed_query.get("class_name")  # Note: changed from "class" to "class_name"
+        time_start = parsed_query.get("time_start")
+        time_end = parsed_query.get("time_end")
+        recognized_name = parsed_query.get("recognized_name")
+        save_to_db = parsed_query.get("save_to_db", False)
+        
+        # Get current video path
+        video_path = None
+        if self.video_player:
+            video_path = self.video_player.get_video_path()
+        
+        if not video_path:
+            self.chatbot.add_response("No video loaded. Please load a video first.")
+            return
+        
+        # If time_end is None, set to video end
+        if time_end is None:
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                time_end = total_frames / fps
+                cap.release()
+        
+        if action in ["find", "save"]:
+            # Query database for detections
+            db_results = self.detection_db.query_detections(
+                video_path=video_path,
+                class_name=class_name,
+                recognized_name=recognized_name,
+                time_start=time_start,
+                time_end=time_end
+            )
+            
+            if not db_results:
+                self.chatbot.add_response(f"No detections found matching your criteria.")
+                return
+            
+            # Convert database results to results panel format
+            # Group by timestamp to combine multiple detections in same frame
+            results_by_time = {}
+            for db_result in db_results:
+                timestamp = db_result["timestamp"]
+                if timestamp not in results_by_time:
+                    results_by_time[timestamp] = {
+                        "frame": db_result["frame"],
+                        "time": timestamp,
+                        "detections": []
+                    }
+                
+                # Add detection to this timestamp's list
+                det = {
+                    "bbox": db_result["bbox"],
+                    "confidence": db_result["confidence"],
+                    "class": db_result["class_name"],
+                    "recognized_name": db_result["recognized_name"],
+                    "model": db_result["model_name"]
+                }
+                results_by_time[timestamp]["detections"].append(det)
+            
+            # Convert to list
+            results_for_panel = list(results_by_time.values())
+            
+            # Update results panel
+            self.results_panel.detection_results = results_for_panel
+            self.results_panel.update_display()
+            
+            # Save to filesystem if requested
+            if save_to_db or action == "save":
+                # Save images to filesystem
+                saved_count = 0
+                save_dir = QFileDialog.getExistingDirectory(self, "Select Save Directory")
+                if save_dir:
+                    for result in results_for_panel:
+                        time_str = f"{int(result['time']//60):02d}_{int(result['time']%60):02d}"
+                        filename = f"detection_{time_str}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                        filepath = Path(save_dir) / filename
+                        cv2.imwrite(str(filepath), result["frame"])
+                        saved_count += 1
+                    
+                    self.chatbot.add_response(
+                        f"Found {len(db_results)} detections. "
+                        f"Saved {saved_count} images to: {save_dir}\n"
+                        f"All detections are also saved in the database."
+                    )
+                else:
+                    self.chatbot.add_response(
+                        f"Found {len(db_results)} detections in database. "
+                        f"All detections are saved in the database."
+                    )
+            else:
+                self.chatbot.add_response(f"Found {len(db_results)} detections matching your criteria.")
     
     def test_camera_source(self, source):
         """Test if a camera source is available."""
@@ -350,6 +617,8 @@ class VMSClientApp(QMainWindow):
     def closeEvent(self, event):
         """Handle application close."""
         self.detection_engine.stop_capture()
+        if self.video_player:
+            self.video_player.cleanup()
         event.accept()
 
 
