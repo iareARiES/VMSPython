@@ -285,22 +285,36 @@ class BottomBar(QWidget):
         
         if is_linux:
             # On Linux/RPi, check /dev/video* devices
-            video_devices = sorted(Path("/dev").glob("video*"))
-            for video_dev in video_devices:
-                dev_path = str(video_dev)
-                # Test if device is actually a video capture device
-                if self._test_camera_device(dev_path):
+            # Only check video0-video9 to avoid testing display outputs (video20+)
+            video_devices = []
+            for i in range(10):  # Only check video0-video9
+                dev_path = f"/dev/video{i}"
+                if Path(dev_path).exists():
+                    video_devices.append(dev_path)
+            
+            # Test each device with timeout
+            for dev_path in video_devices:
+                if self._test_camera_device(dev_path, timeout=2.0):
                     available_sources.append(dev_path)
             
-            # Also check numeric indices (0, 1, 2, etc.)
+            # Also check numeric indices (0, 1, 2, etc.) with timeout
             for idx in range(4):  # Check first 4 indices
-                if self._test_camera_device(idx):
+                if self._test_camera_device(idx, timeout=2.0):
                     available_sources.append(str(idx))
         else:
             # On Windows/Mac, check numeric indices
             for idx in range(4):
-                if self._test_camera_device(idx):
+                if self._test_camera_device(idx, timeout=2.0):
                     available_sources.append(str(idx))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_sources = []
+        for src in available_sources:
+            if src not in seen:
+                seen.add(src)
+                unique_sources.append(src)
+        available_sources = unique_sources
         
         # If no cameras detected, add defaults
         if not available_sources:
@@ -315,45 +329,76 @@ class BottomBar(QWidget):
         if available_sources:
             self.video_source_combo.setCurrentText(available_sources[0])
     
-    def _test_camera_device(self, source):
-        """Test if a camera device is available and working."""
+    def _test_camera_device(self, source, timeout=2.0):
+        """Test if a camera device is available and working with timeout."""
         if not HAS_CV2:
             return False
         
+        import threading
+        import time
+        
         test_cap = None
-        try:
-            # Try to open with V4L2 on Linux
-            if platform.system() == "Linux":
-                if isinstance(source, str) and source.startswith("/dev/video"):
-                    try:
-                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
-                    except:
-                        test_cap = cv2.VideoCapture(source)
-                elif isinstance(source, int):
-                    try:
-                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
-                    except:
+        result = {"success": False}
+        
+        def test_camera():
+            """Inner function to test camera."""
+            nonlocal test_cap
+            try:
+                # Try to open with V4L2 on Linux
+                if platform.system() == "Linux":
+                    if isinstance(source, str) and source.startswith("/dev/video"):
+                        try:
+                            test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                            if not test_cap.isOpened():
+                                test_cap = cv2.VideoCapture(source)
+                        except:
+                            test_cap = cv2.VideoCapture(source)
+                    elif isinstance(source, int):
+                        try:
+                            test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                            if not test_cap.isOpened():
+                                test_cap = cv2.VideoCapture(source)
+                        except:
+                            test_cap = cv2.VideoCapture(source)
+                    else:
                         test_cap = cv2.VideoCapture(source)
                 else:
-                    test_cap = cv2.VideoCapture(source)
-            else:
-                if isinstance(source, int):
-                    test_cap = cv2.VideoCapture(source)
-                else:
-                    test_cap = cv2.VideoCapture(str(source))
-            
-            if test_cap is None or not test_cap.isOpened():
-                return False
-            
-            # Try to read a frame
-            ret, frame = test_cap.read()
-            test_cap.release()
-            return ret and frame is not None
-        except Exception as e:
-            if test_cap:
+                    if isinstance(source, int):
+                        test_cap = cv2.VideoCapture(source)
+                    else:
+                        test_cap = cv2.VideoCapture(str(source))
+                
+                if test_cap is None or not test_cap.isOpened():
+                    return
+                
+                # Try to read a frame (with quick timeout)
+                # Set a short timeout for reading
                 try:
-                    test_cap.release()
+                    test_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 except:
                     pass
+                
+                ret, frame = test_cap.read()
+                
+                if ret and frame is not None:
+                    result["success"] = True
+            except Exception:
+                pass
+            finally:
+                if test_cap:
+                    try:
+                        test_cap.release()
+                    except:
+                        pass
+        
+        # Run test in a thread with timeout
+        test_thread = threading.Thread(target=test_camera, daemon=True)
+        test_thread.start()
+        test_thread.join(timeout=timeout)
+        
+        # If thread is still alive, it timed out
+        if test_thread.is_alive():
             return False
+        
+        return result["success"]
 
