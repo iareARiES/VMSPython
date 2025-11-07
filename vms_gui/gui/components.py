@@ -3,13 +3,21 @@ GUI components: TopBar, BottomBar, SOSDialog.
 """
 
 import platform
+import os
 from datetime import datetime
+from pathlib import Path
 
 try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -175,10 +183,9 @@ class BottomBar(QWidget):
         # Video Source Selector
         layout.addWidget(QLabel("Video Source:"))
         self.video_source_combo = QComboBox()
-        # Add common camera sources
-        self.video_source_combo.addItems(["0", "1", "2", "/dev/video0", "/dev/video1", "/dev/video2"])
+        # Auto-detect available cameras (especially for RPi 5)
+        self.detect_available_cameras()
         self.video_source_combo.setEditable(True)  # Allow custom input
-        self.video_source_combo.setCurrentText("0")
         self.video_source_combo.setMinimumWidth(120)
         layout.addWidget(self.video_source_combo)
         
@@ -270,4 +277,83 @@ class BottomBar(QWidget):
                 except:
                     pass
         return None, None  # Use camera default
+    
+    def detect_available_cameras(self):
+        """Auto-detect available cameras, especially for RPi 5."""
+        available_sources = []
+        is_linux = platform.system() == "Linux"
+        
+        if is_linux:
+            # On Linux/RPi, check /dev/video* devices
+            video_devices = sorted(Path("/dev").glob("video*"))
+            for video_dev in video_devices:
+                dev_path = str(video_dev)
+                # Test if device is actually a video capture device
+                if self._test_camera_device(dev_path):
+                    available_sources.append(dev_path)
+            
+            # Also check numeric indices (0, 1, 2, etc.)
+            for idx in range(4):  # Check first 4 indices
+                if self._test_camera_device(idx):
+                    available_sources.append(str(idx))
+        else:
+            # On Windows/Mac, check numeric indices
+            for idx in range(4):
+                if self._test_camera_device(idx):
+                    available_sources.append(str(idx))
+        
+        # If no cameras detected, add defaults
+        if not available_sources:
+            available_sources = ["0", "1", "/dev/video0", "/dev/video1"]
+            print("Warning: Could not auto-detect cameras. Using defaults.")
+        else:
+            print(f"Detected {len(available_sources)} available camera(s): {available_sources}")
+        
+        # Populate combo box
+        self.video_source_combo.clear()
+        self.video_source_combo.addItems(available_sources)
+        if available_sources:
+            self.video_source_combo.setCurrentText(available_sources[0])
+    
+    def _test_camera_device(self, source):
+        """Test if a camera device is available and working."""
+        if not HAS_CV2:
+            return False
+        
+        test_cap = None
+        try:
+            # Try to open with V4L2 on Linux
+            if platform.system() == "Linux":
+                if isinstance(source, str) and source.startswith("/dev/video"):
+                    try:
+                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                    except:
+                        test_cap = cv2.VideoCapture(source)
+                elif isinstance(source, int):
+                    try:
+                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                    except:
+                        test_cap = cv2.VideoCapture(source)
+                else:
+                    test_cap = cv2.VideoCapture(source)
+            else:
+                if isinstance(source, int):
+                    test_cap = cv2.VideoCapture(source)
+                else:
+                    test_cap = cv2.VideoCapture(str(source))
+            
+            if test_cap is None or not test_cap.isOpened():
+                return False
+            
+            # Try to read a frame
+            ret, frame = test_cap.read()
+            test_cap.release()
+            return ret and frame is not None
+        except Exception as e:
+            if test_cap:
+                try:
+                    test_cap.release()
+                except:
+                    pass
+            return False
 

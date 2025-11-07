@@ -4,6 +4,7 @@ Main VMS Client application.
 
 import sys
 import cv2
+import platform
 from pathlib import Path
 from datetime import datetime
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QDialog, QFileDialog
@@ -359,26 +360,59 @@ class VMSClientApp(QMainWindow):
                 self.chatbot.add_response(f"Found {len(db_results)} detections matching your criteria.")
     
     def test_camera_source(self, source):
-        """Test if a camera source is available."""
+        """Test if a camera source is available (RPi 5 compatible)."""
         test_cap = None
         try:
+            is_linux = platform.system() == "Linux"
+            
             if isinstance(source, str) and source.isdigit():
                 source = int(source)
-            if isinstance(source, int):
-                test_cap = cv2.VideoCapture(source)
+            
+            # Use V4L2 on Linux/RPi for better compatibility
+            if is_linux:
+                if isinstance(source, int):
+                    try:
+                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                        if not test_cap.isOpened():
+                            test_cap = cv2.VideoCapture(source)
+                    except:
+                        test_cap = cv2.VideoCapture(source)
+                elif isinstance(source, str) and source.startswith("/dev/video"):
+                    try:
+                        test_cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                        if not test_cap.isOpened():
+                            test_cap = cv2.VideoCapture(source)
+                    except:
+                        test_cap = cv2.VideoCapture(source)
+                else:
+                    test_cap = cv2.VideoCapture(str(source))
             else:
-                test_cap = cv2.VideoCapture(str(source))
+                if isinstance(source, int):
+                    test_cap = cv2.VideoCapture(source)
+                else:
+                    test_cap = cv2.VideoCapture(str(source))
             
             if test_cap is None or not test_cap.isOpened():
                 return False
             
-            # Try to read a frame
-            ret, frame = test_cap.read()
+            # Try to read a frame (with retry for RPi 5)
+            ret = False
+            frame = None
+            for _ in range(3):
+                ret, frame = test_cap.read()
+                if ret and frame is not None:
+                    break
+                import time
+                time.sleep(0.1)
+            
             test_cap.release()
             return ret and frame is not None
-        except:
+        except Exception as e:
             if test_cap:
-                test_cap.release()
+                try:
+                    test_cap.release()
+                except:
+                    pass
             return False
     
     def start_detection(self):

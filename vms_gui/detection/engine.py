@@ -153,28 +153,52 @@ class VideoCapture:
         self.target_height = height
     
     def open(self):
-        """Open camera with platform-specific handling."""
+        """Open camera with platform-specific handling for RPi 5 and webcams."""
         # Convert source to appropriate type
         if isinstance(self.source, str):
             if self.source.startswith("/dev/video"):
-                # Linux device path
-                if IS_LINUX and hasattr(cv2, 'CAP_V4L2'):
+                # Linux device path (RPi 5 webcam)
+                if IS_LINUX:
+                    # Try V4L2 first (recommended for RPi 5)
                     try:
                         self.cap = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
-                    except:
+                        if not self.cap.isOpened():
+                            # Fallback to default backend
+                            self.cap = cv2.VideoCapture(self.source)
+                    except Exception as e:
+                        print(f"V4L2 failed, trying default backend: {e}")
                         self.cap = cv2.VideoCapture(self.source)
                 else:
                     self.cap = cv2.VideoCapture(self.source)
             elif self.source.isdigit():
                 # Numeric string (camera index)
                 source_int = int(self.source)
-                self.cap = cv2.VideoCapture(source_int)
+                # On Linux/RPi, try V4L2 for index-based access too
+                if IS_LINUX:
+                    try:
+                        # Try V4L2 first
+                        self.cap = cv2.VideoCapture(source_int, cv2.CAP_V4L2)
+                        if not self.cap.isOpened():
+                            self.cap = cv2.VideoCapture(source_int)
+                    except:
+                        self.cap = cv2.VideoCapture(source_int)
+                else:
+                    self.cap = cv2.VideoCapture(source_int)
             else:
                 # Try as string path
                 self.cap = cv2.VideoCapture(self.source)
         elif isinstance(self.source, int):
             # Direct integer (camera index)
-            self.cap = cv2.VideoCapture(self.source)
+            # On Linux/RPi, try V4L2
+            if IS_LINUX:
+                try:
+                    self.cap = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+                    if not self.cap.isOpened():
+                        self.cap = cv2.VideoCapture(self.source)
+                except:
+                    self.cap = cv2.VideoCapture(self.source)
+            else:
+                self.cap = cv2.VideoCapture(self.source)
         else:
             # Try converting to string
             self.cap = cv2.VideoCapture(str(self.source))
@@ -187,43 +211,59 @@ class VideoCapture:
             self.cap.release()
             raise RuntimeError(f"Failed to open camera: {self.source}. Camera may be in use or not available.")
         
-        # Set resolution if specified
+        # Set resolution if specified (important for RPi 5 performance)
         if self.target_width and self.target_height:
             try:
+                # Set properties before reading frames (RPi 5 optimization)
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
-                # Give camera time to adjust
-                time.sleep(0.1)
+                # Give camera time to adjust (RPi 5 may need more time)
+                time.sleep(0.2)
+                # Read a dummy frame to apply settings
+                self.cap.read()
             except Exception as e:
                 print(f"Warning: Could not set resolution to {self.target_width}x{self.target_height}: {e}")
         
-        # Set camera properties (these may fail on some cameras, so wrap in try/except)
+        # Set camera properties optimized for RPi 5 webcam
         try:
+            # Reduce buffer size to minimize latency (important for RPi 5)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except:
             pass  # Some backends don't support this
         
         try:
-            if isinstance(self.source, int) or (isinstance(self.source, str) and str(self.source).isdigit()):
+            # Set FPS (RPi 5 can handle 30fps with most webcams)
+            if isinstance(self.source, int) or (isinstance(self.source, str) and (self.source.isdigit() or self.source.startswith("/dev/video"))):
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
         except:
             pass  # Some cameras don't support FPS setting
         
         try:
-            if isinstance(self.source, int) or (isinstance(self.source, str) and str(self.source).isdigit()):
+            # Set MJPEG format for better performance on RPi 5
+            if isinstance(self.source, int) or (isinstance(self.source, str) and (self.source.isdigit() or self.source.startswith("/dev/video"))):
+                # Try MJPEG first (better for RPi 5)
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         except:
             pass  # Some cameras don't support FOURCC setting
         
-        # Verify we can actually read a frame
-        ret, test_frame = self.cap.read()
+        # Verify we can actually read a frame (with retry for RPi 5)
+        retry_count = 3
+        ret = False
+        test_frame = None
+        for i in range(retry_count):
+            ret, test_frame = self.cap.read()
+            if ret and test_frame is not None:
+                break
+            time.sleep(0.1)  # Wait a bit before retry
+        
         if not ret or test_frame is None:
             self.cap.release()
-            raise RuntimeError(f"Camera opened but cannot read frames from: {self.source}")
+            raise RuntimeError(f"Camera opened but cannot read frames from: {self.source}. Try checking camera permissions or if another app is using it.")
         
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"Successfully opened camera {self.source}, resolution: {actual_width}x{actual_height}")
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        print(f"Successfully opened camera {self.source}, resolution: {actual_width}x{actual_height}, FPS: {actual_fps}")
     
     def set_resolution(self, width, height):
         """Change camera resolution on the fly."""
