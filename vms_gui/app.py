@@ -21,6 +21,19 @@ class VMSClientApp(QMainWindow):
         # Initialize detection engine
         self.detection_engine = DetectionEngine()
         
+        # SOS tracking
+        self.sos_settings = {
+            "sos_unknown_face_enabled": False,
+            "sos_unknown_face_count": 1,
+            "sos_known_face_enabled": False,
+            "sos_known_face_count": 1,
+            "class_settings": {}  # For other models: {class_name: count_threshold}
+        }
+        self.unknown_face_count = 0
+        self.known_face_count = 0
+        self.class_counts = {}  # {class_name: current_count} for class-based SOS
+        self.last_known_faces = set()  # Track known faces to avoid duplicate alerts
+        
         # Setup GUI
         self.setup_ui()
         
@@ -65,32 +78,26 @@ class VMSClientApp(QMainWindow):
         self.bottom_bar.stop_btn.clicked.connect(self.stop_detection)
         self.bottom_bar.stop_all_btn.clicked.connect(self.stop_all)
         self.bottom_bar.refresh_btn.clicked.connect(self.refresh_models)
-        # Also refresh video sources when refresh button is clicked (double-click or separate action)
-        # For now, we'll add a separate method that can be called
         self.bottom_bar.video_source_combo.currentTextChanged.connect(self.on_video_source_changed)
         self.bottom_bar.resolution_combo.currentTextChanged.connect(self.bottom_bar.on_resolution_changed)
         self.bottom_bar.resolution_combo.currentTextChanged.connect(self.on_resolution_changed_live)
         self.bottom_bar.custom_width_spin.valueChanged.connect(self.on_custom_resolution_changed)
+        
+        # Connect SOS settings
+        self.model_panel.sos_settings_changed.connect(self.on_sos_settings_changed)
+        
+        # Connect video display for notifications
+        self.video_display.known_face_detected.connect(self.on_known_face_detected)
+        self.video_display.parent_app = self  # Set reference for SOS checking
         self.bottom_bar.custom_height_spin.valueChanged.connect(self.on_custom_resolution_changed)
     
     def test_camera_source(self, source):
         """Test if a camera source is available."""
         test_cap = None
         try:
-            import platform
-            is_linux = platform.system() == "Linux"
-            
-            source_str = str(source)
-            if isinstance(source, str) and source_str.isdigit():
+            if isinstance(source, str) and source.isdigit():
                 source = int(source)
-            
-            # On Linux, try V4L2 backend for /dev/video* devices
-            if isinstance(source, str) and source_str.startswith("/dev/video") and is_linux:
-                if hasattr(cv2, 'CAP_V4L2'):
-                    test_cap = cv2.VideoCapture(source_str, cv2.CAP_V4L2)
-                else:
-                    test_cap = cv2.VideoCapture(source_str)
-            elif isinstance(source, int):
+            if isinstance(source, int):
                 test_cap = cv2.VideoCapture(source)
             else:
                 test_cap = cv2.VideoCapture(str(source))
@@ -112,28 +119,20 @@ class VMSClientApp(QMainWindow):
         # Get selected video source
         source_text = self.bottom_bar.video_source_combo.currentText().strip()
         
-        # Check if combo box has user data (V4L2 device path)
-        current_data = self.bottom_bar.video_source_combo.currentData()
-        if current_data:
-            source = current_data
-        else:
-            # Parse source from text
-            try:
-                if source_text.isdigit():
+        # Parse source
+        try:
+            if source_text.isdigit():
+                source = int(source_text)
+            elif source_text.startswith("/dev/video"):
+                source = source_text
+            else:
+                # Try as integer first
+                try:
                     source = int(source_text)
-                elif source_text.startswith("/dev/video"):
+                except:
                     source = source_text
-                elif "(" in source_text and "/dev/video" in source_text:
-                    # Extract device path from display name like "/dev/video0 (Camera Name)"
-                    source = source_text.split("(")[0].strip()
-                else:
-                    # Try as integer first
-                    try:
-                        source = int(source_text)
-                    except:
-                        source = source_text
-            except:
-                source = 0
+        except:
+            source = 0
         
         # Test camera before attempting to open
         print(f"Testing camera source: {source}")
@@ -241,6 +240,112 @@ class VMSClientApp(QMainWindow):
             else:
                 QMessageBox.warning(self, "Resolution Change Failed", 
                                   f"Could not change resolution to {width}x{height}.\nCamera may not support this resolution.")
+    
+    def on_sos_settings_changed(self, settings):
+        """Handle SOS settings change."""
+        self.sos_settings = settings
+        self.unknown_face_count = 0
+        self.known_face_count = 0
+        # Reset class counts
+        if "class_settings" in settings:
+            self.class_counts = {class_name: 0 for class_name in settings["class_settings"].keys()}
+        else:
+            self.class_counts = {}
+        self.last_known_faces.clear()
+        print(f"SOS settings updated: {settings}")
+    
+    def on_known_face_detected(self, name):
+        """Handle known face detection notification."""
+        if name not in self.last_known_faces:
+            self.last_known_faces.add(name)
+            # Show notification
+            QMessageBox.information(
+                self, "Known Face Detected",
+                f"Known face detected: {name}"
+            )
+            print(f"Known face detected: {name}")
+    
+    def check_sos_triggers(self, detections):
+        """Check if SOS should be triggered based on detections."""
+        unknown_faces = 0
+        known_faces = set()
+        class_detections = {}  # Count detections by class
+        
+        for det in detections:
+            cls_name = det.get("class")
+            recognized_name = det.get("recognized_name")
+            
+            # Handle face recognition cases
+            if cls_name == "face" and recognized_name:
+                if recognized_name == "Unknown":
+                    unknown_faces += 1
+                    # Also count as "unknown face" class if it exists
+                    if "unknown face" in class_detections:
+                        class_detections["unknown face"] += 1
+                    else:
+                        class_detections["unknown face"] = 1
+                elif recognized_name and recognized_name != "Unknown":
+                    known_faces.add(recognized_name)
+            else:
+                # Regular class detection
+                class_detections[cls_name] = class_detections.get(cls_name, 0) + 1
+        
+        # Check unknown face trigger (for best model + recognition)
+        if self.sos_settings.get("sos_unknown_face_enabled", False) and unknown_faces > 0:
+            self.unknown_face_count += unknown_faces
+            if self.unknown_face_count >= self.sos_settings.get("sos_unknown_face_count", 1):
+                if not self.top_bar.sos_active:
+                    reply = QMessageBox.warning(
+                        self, "SOS Trigger - Unknown Face",
+                        f"Unknown face detected {self.unknown_face_count} time(s).\n"
+                        f"Trigger SOS alert?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.top_bar.toggle_sos()
+                self.unknown_face_count = 0  # Reset after trigger
+        
+        # Check known face trigger
+        if self.sos_settings.get("sos_known_face_enabled", False) and len(known_faces) > 0:
+            self.known_face_count += len(known_faces)
+            if self.known_face_count >= self.sos_settings.get("sos_known_face_count", 1):
+                if not self.top_bar.sos_active:
+                    reply = QMessageBox.warning(
+                        self, "SOS Trigger - Known Face",
+                        f"Known face(s) detected {self.known_face_count} time(s).\n"
+                        f"Trigger SOS alert?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.top_bar.toggle_sos()
+                self.known_face_count = 0  # Reset after trigger
+        
+        # Check class-based SOS triggers (for other models)
+        class_settings = self.sos_settings.get("class_settings", {})
+        for class_name, threshold in class_settings.items():
+            if class_name in class_detections:
+                count = class_detections[class_name]
+                
+                # Update running count for this class
+                if class_name not in self.class_counts:
+                    self.class_counts[class_name] = 0
+                self.class_counts[class_name] += count
+                
+                # Check if threshold reached
+                if self.class_counts[class_name] >= threshold:
+                    if not self.top_bar.sos_active:
+                        reply = QMessageBox.warning(
+                            self, f"SOS Trigger - {class_name.title()}",
+                            f"{class_name.title()} detected {self.class_counts[class_name]} time(s) "
+                            f"(threshold: {threshold}).\n"
+                            f"Trigger SOS alert?",
+                            QMessageBox.Yes | QMessageBox.No
+                        )
+                        if reply == QMessageBox.Yes:
+                            self.top_bar.toggle_sos()
+                    
+                    # Reset count after trigger
+                    self.class_counts[class_name] = 0
     
     def closeEvent(self, event):
         """Handle application close."""

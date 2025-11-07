@@ -6,8 +6,6 @@ import cv2
 import numpy as np
 import platform
 import time
-import os
-import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -21,55 +19,17 @@ except ImportError:
 
 from ..config import COCO_CLASSES
 
+# Face recognition (optional import)
+try:
+    from .face_recognition import FaceRecognizer
+    HAS_FACE_RECOGNITION = True
+except ImportError:
+    HAS_FACE_RECOGNITION = False
+    FaceRecognizer = None
+
 # Detect platform
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
-# Detect Raspberry Pi
-IS_RASPBERRY_PI = False
-if IS_LINUX and os.path.exists("/proc/device-tree/model"):
-    try:
-        with open("/proc/device-tree/model", "r") as f:
-            model_info = f.read().lower()
-            IS_RASPBERRY_PI = "raspberry" in model_info
-    except:
-        pass
-
-
-def detect_v4l2_devices():
-    """Detect available V4L2 devices on Linux/Raspberry Pi."""
-    devices = []
-    if not IS_LINUX:
-        return devices
-    
-    try:
-        # Check /dev/video* devices
-        for i in range(10):  # Check up to /dev/video9
-            device_path = f"/dev/video{i}"
-            if os.path.exists(device_path):
-                # Try to get device info using v4l2-ctl if available
-                device_info = {"path": device_path, "index": i, "name": f"Video Device {i}"}
-                try:
-                    result = subprocess.run(
-                        ["v4l2-ctl", "--device", device_path, "--info"],
-                        capture_output=True,
-                        text=True,
-                        timeout=2
-                    )
-                    if result.returncode == 0:
-                        # Parse device name from output
-                        for line in result.stdout.split('\n'):
-                            if 'Card type' in line or 'Driver name' in line:
-                                device_info["name"] = line.split(':')[-1].strip()
-                                break
-                except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-                    # v4l2-ctl not available or device not accessible, use default name
-                    pass
-                
-                devices.append(device_info)
-    except Exception as e:
-        print(f"Error detecting V4L2 devices: {e}")
-    
-    return devices
 
 
 def detect_model_classes(model_path):
@@ -185,172 +145,85 @@ def detect_model_classes(model_path):
 
 
 class VideoCapture:
-    """Direct video capture with enhanced V4L2 support for Raspberry Pi."""
+    """Direct video capture."""
     def __init__(self, source, width=None, height=None):
         self.source = source
         self.cap = None
         self.target_width = width
         self.target_height = height
-        self.is_v4l2 = False
-        self.v4l2_device_path = None
-    
-    def _open_v4l2(self, device_path):
-        """Open camera using V4L2 backend on Linux/Raspberry Pi."""
-        if not IS_LINUX:
-            return None
-        
-        try:
-            # Try V4L2 backend explicitly
-            if hasattr(cv2, 'CAP_V4L2'):
-                cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
-                if cap.isOpened():
-                    self.is_v4l2 = True
-                    self.v4l2_device_path = device_path
-                    print(f"Opened {device_path} using V4L2 backend")
-                    return cap
-                else:
-                    cap.release()
-        except Exception as e:
-            print(f"V4L2 backend failed for {device_path}: {e}")
-        
-        # Fallback to default backend
-        try:
-            cap = cv2.VideoCapture(device_path)
-            if cap.isOpened():
-                print(f"Opened {device_path} using default backend")
-                return cap
-        except Exception as e:
-            print(f"Default backend failed for {device_path}: {e}")
-        
-        return None
-    
-    def _configure_v4l2_properties(self):
-        """Configure V4L2-specific camera properties for optimal performance."""
-        if not self.is_v4l2 or not self.cap:
-            return
-        
-        try:
-            # Set buffer size to reduce latency (V4L2 supports this)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except:
-            pass
-        
-        try:
-            # Set FPS (30 FPS is common for webcams)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-        except:
-            pass
-        
-        # Try to set MJPEG format for better performance on Raspberry Pi
-        # MJPEG is hardware-accelerated on many Pi cameras
-        try:
-            # Try MJPEG first (better performance on Pi)
-            fourcc_mjpeg = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
-            self.cap.set(cv2.CAP_PROP_FOURCC, fourcc_mjpeg)
-            # Read a frame to apply the format change
-            self.cap.read()
-        except:
-            # If MJPEG fails, try YUYV (common fallback)
-            try:
-                fourcc_yuyv = cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V')
-                self.cap.set(cv2.CAP_PROP_FOURCC, fourcc_yuyv)
-                self.cap.read()
-            except:
-                pass
-        
-        # Set auto-exposure and other V4L2 controls if available
-        if self.v4l2_device_path:
-            try:
-                # Use v4l2-ctl to set additional properties if available
-                subprocess.run(
-                    ["v4l2-ctl", "--device", self.v4l2_device_path, "--set-ctrl=exposure_auto=1"],
-                    capture_output=True,
-                    timeout=1
-                )
-            except:
-                pass  # v4l2-ctl not available or not needed
     
     def open(self):
-        """Open camera with platform-specific handling and enhanced V4L2 support."""
+        """Open camera with platform-specific handling."""
         # Convert source to appropriate type
-        source_str = str(self.source)
-        
-        # Handle V4L2 device paths (/dev/video*)
-        if source_str.startswith("/dev/video"):
-            self.cap = self._open_v4l2(source_str)
-            if not self.cap or not self.cap.isOpened():
-                raise RuntimeError(f"Failed to open V4L2 device: {source_str}. Camera may be in use or not available.")
-        # Handle numeric sources (camera indices)
-        elif source_str.isdigit() or isinstance(self.source, int):
-            source_int = int(self.source) if isinstance(self.source, str) else self.source
-            
-            # On Linux/Raspberry Pi, try to map index to /dev/video* device
-            if IS_LINUX:
-                v4l2_devices = detect_v4l2_devices()
-                if source_int < len(v4l2_devices):
-                    # Use the detected V4L2 device path
-                    device_path = v4l2_devices[source_int]["path"]
-                    self.cap = self._open_v4l2(device_path)
-                    if self.cap and self.cap.isOpened():
-                        print(f"Mapped camera index {source_int} to V4L2 device {device_path}")
-                    else:
-                        # Fallback to direct index
-                        self.cap = cv2.VideoCapture(source_int)
+        if isinstance(self.source, str):
+            if self.source.startswith("/dev/video"):
+                # Linux device path
+                if IS_LINUX and hasattr(cv2, 'CAP_V4L2'):
+                    try:
+                        self.cap = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+                    except:
+                        self.cap = cv2.VideoCapture(self.source)
                 else:
-                    # Direct index access
-                    self.cap = cv2.VideoCapture(source_int)
-            else:
-                # Windows/other platforms - direct index
+                    self.cap = cv2.VideoCapture(self.source)
+            elif self.source.isdigit():
+                # Numeric string (camera index)
+                source_int = int(self.source)
                 self.cap = cv2.VideoCapture(source_int)
+            else:
+                # Try as string path
+                self.cap = cv2.VideoCapture(self.source)
+        elif isinstance(self.source, int):
+            # Direct integer (camera index)
+            self.cap = cv2.VideoCapture(self.source)
         else:
-            # Try as string path (file or URL)
-            self.cap = cv2.VideoCapture(source_str)
+            # Try converting to string
+            self.cap = cv2.VideoCapture(str(self.source))
         
         # Check if camera opened successfully
         if self.cap is None:
             raise RuntimeError(f"Failed to create VideoCapture object for: {self.source}")
         
         if not self.cap.isOpened():
-            if self.cap:
-                self.cap.release()
+            self.cap.release()
             raise RuntimeError(f"Failed to open camera: {self.source}. Camera may be in use or not available.")
-        
-        # Configure V4L2-specific properties if using V4L2
-        if self.is_v4l2:
-            self._configure_v4l2_properties()
         
         # Set resolution if specified
         if self.target_width and self.target_height:
             try:
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
-                # Give camera time to adjust (V4L2 may need more time)
-                time.sleep(0.2 if self.is_v4l2 else 0.1)
+                # Give camera time to adjust
+                time.sleep(0.1)
             except Exception as e:
                 print(f"Warning: Could not set resolution to {self.target_width}x{self.target_height}: {e}")
         
-        # Set general camera properties
+        # Set camera properties (these may fail on some cameras, so wrap in try/except)
         try:
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except:
-            pass
+            pass  # Some backends don't support this
         
         try:
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            if isinstance(self.source, int) or (isinstance(self.source, str) and str(self.source).isdigit()):
+                self.cap.set(cv2.CAP_PROP_FPS, 30)
         except:
-            pass
+            pass  # Some cameras don't support FPS setting
+        
+        try:
+            if isinstance(self.source, int) or (isinstance(self.source, str) and str(self.source).isdigit()):
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        except:
+            pass  # Some cameras don't support FOURCC setting
         
         # Verify we can actually read a frame
         ret, test_frame = self.cap.read()
         if not ret or test_frame is None:
-            if self.cap:
-                self.cap.release()
+            self.cap.release()
             raise RuntimeError(f"Camera opened but cannot read frames from: {self.source}")
         
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        backend = "V4L2" if self.is_v4l2 else "Default"
-        print(f"Successfully opened camera {self.source} ({backend}), resolution: {actual_width}x{actual_height}")
+        print(f"Successfully opened camera {self.source}, resolution: {actual_width}x{actual_height}")
     
     def set_resolution(self, width, height):
         """Change camera resolution on the fly."""
@@ -485,10 +358,6 @@ class ONNXRunner:
         return self.class_names
 
 
-# Export detect_v4l2_devices for use in GUI
-__all__ = ['DetectionEngine', 'VideoCapture', 'ONNXRunner', 'detect_v4l2_devices']
-
-
 class DetectionEngine:
     """Direct detection engine."""
     def __init__(self):
@@ -498,6 +367,8 @@ class DetectionEngine:
         self.running = False
         self.current_frame = None
         self.current_detections = []
+        self.face_recognizer = None  # Face recognition model
+        self.recognition_model_path = None
     
     def load_model(self, model_name, model_path, model_type="coco"):
         """Load ONNX model."""
@@ -544,6 +415,38 @@ class DetectionEngine:
             self.capture.release()
             self.capture = None
     
+    def set_recognition_model(self, model_path: str):
+        """
+        Set face recognition model for embedding extraction.
+        
+        Args:
+            model_path: Path to recognition model (e.g., w600k_mbf.onnx)
+        """
+        if not HAS_FACE_RECOGNITION:
+            print("Face recognition not available")
+            return False
+        
+        try:
+            self.face_recognizer = FaceRecognizer(model_path)
+            self.recognition_model_path = model_path
+            print(f"Face recognition model loaded: {model_path}")
+            return True
+        except Exception as e:
+            print(f"Failed to load face recognition model: {e}")
+            self.face_recognizer = None
+            self.recognition_model_path = None
+            return False
+    
+    def clear_recognition_model(self):
+        """Clear face recognition model."""
+        self.face_recognizer = None
+        self.recognition_model_path = None
+    
+    def reload_face_database(self):
+        """Reload face database (useful after registration)."""
+        if self.face_recognizer:
+            self.face_recognizer.reload_database()
+    
     def process_frame(self):
         """Process one frame with enabled models."""
         if not self.capture or not self.running:
@@ -572,6 +475,58 @@ class DetectionEngine:
                     continue
                 det["model"] = model_name
                 all_detections.append(det)
+        
+        # Apply face recognition if recognizer is loaded and we have face detections
+        if self.face_recognizer and len(all_detections) > 0:
+            frame_h, frame_w = frame.shape[:2]
+            
+            for det in all_detections:
+                # Only recognize "face" class detections
+                if det.get("class") == "face":
+                    x1, y1, x2, y2 = det["bbox"]
+                    
+                    # Ensure coordinates are within frame bounds
+                    x1 = max(0, min(x1, frame_w - 1))
+                    y1 = max(0, min(y1, frame_h - 1))
+                    x2 = max(x1 + 1, min(x2, frame_w))
+                    y2 = max(y1 + 1, min(y2, frame_h))
+                    
+                    # Extract face region
+                    face_roi = frame[y1:y2, x1:x2]
+                    
+                    if face_roi.size > 0 and face_roi.shape[0] > 10 and face_roi.shape[1] > 10:
+                        try:
+                            # Recognize face
+                            name, similarity = self.face_recognizer.recognize_face(face_roi)
+                            if name:
+                                det["recognized_name"] = name
+                                det["recognition_confidence"] = float(similarity)
+                            else:
+                                # Face detected but not recognized - mark as Unknown
+                                det["recognized_name"] = "Unknown"
+                                det["recognition_confidence"] = float(similarity) if similarity > 0 else 0.0
+                        except Exception as e:
+                            # On error, mark as Unknown
+                            det["recognized_name"] = "Unknown"
+                            det["recognition_confidence"] = 0.0
+        
+        # Handle "unknown face" class filtering after recognition
+        # This allows filtering unknown faces separately from regular face detections
+        if len(all_detections) > 0:
+            # Get enabled classes from any model config
+            enabled_classes = {}
+            for config in self.model_configs.values():
+                enabled_classes.update(config.get("enabled_classes", {}))
+            
+            # Filter out unknown faces if "unknown face" class is not enabled
+            if enabled_classes and not enabled_classes.get("unknown face", True):
+                all_detections = [d for d in all_detections 
+                                 if not (d.get("class") == "face" and d.get("recognized_name") == "Unknown")]
+            
+            # Filter out regular faces if only "unknown face" is enabled (and face is not enabled)
+            if enabled_classes and enabled_classes.get("unknown face", False) and not enabled_classes.get("face", True):
+                all_detections = [d for d in all_detections 
+                                 if not (d.get("class") == "face" and d.get("recognized_name") != "Unknown")]
         
         self.current_frame = frame
         self.current_detections = all_detections

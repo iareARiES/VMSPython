@@ -4,15 +4,19 @@ Video display component with detection overlays.
 
 import cv2
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap, QImage
 
 
 class VideoDisplay(QWidget):
     """Center video display with detection overlays."""
+    # Signal emitted when a known face is detected
+    known_face_detected = Signal(str)
+    
     def __init__(self, detection_engine, parent=None):
         super().__init__(parent)
         self.detection_engine = detection_engine
+        self.parent_app = parent  # Reference to main app for SOS checking
         self.setup_ui()
         
         # Video update timer
@@ -44,6 +48,21 @@ class VideoDisplay(QWidget):
             # Silently handle errors - camera might be disconnected
             return
         
+        # Check for known faces and emit signals
+        known_faces_in_frame = set()
+        for det in detections:
+            recognized_name = det.get("recognized_name")
+            if recognized_name and recognized_name != "Unknown":
+                known_faces_in_frame.add(recognized_name)
+        
+        # Emit signal for each new known face
+        for name in known_faces_in_frame:
+            self.known_face_detected.emit(name)
+        
+        # Check SOS triggers if parent app is available
+        if self.parent_app and hasattr(self.parent_app, 'check_sos_triggers'):
+            self.parent_app.check_sos_triggers(detections)
+        
         # Draw detections
         display_frame = frame.copy()
         for det in detections:
@@ -51,12 +70,34 @@ class VideoDisplay(QWidget):
             conf = det["confidence"]
             cls_name = det["class"]
             
-            # Draw bounding box (blue for normal, red for high confidence)
-            color = (255, 0, 0) if conf > 0.7 else (74, 158, 255)  # Red or blue
+            # Check if face is recognized
+            recognized_name = det.get("recognized_name")
+            recognition_conf = det.get("recognition_confidence", 0.0)
+            
+            # Check if recognition model is active (if recognized_name exists, recognition was attempted)
+            recognition_active = recognized_name is not None
+            
+            # Draw bounding box
+            if recognition_active:
+                if recognized_name and recognized_name != "Unknown":
+                    color = (0, 255, 0)  # Green for recognized faces
+                else:
+                    color = (0, 165, 255)  # Orange for Unknown faces
+            elif conf > 0.7:
+                color = (255, 0, 0)  # Red for high confidence
+            else:
+                color = (74, 158, 255)  # Blue for normal
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
             
-            # Draw label
-            label = f"{cls_name} {conf:.0%}"
+            # Draw label - show recognized name if recognition is active
+            if recognition_active:
+                if recognized_name and recognized_name != "Unknown":
+                    label = f"{recognized_name} ({recognition_conf:.0%})"
+                else:
+                    label = f"Unknown ({conf:.0%})"
+            else:
+                label = f"{cls_name} {conf:.0%}"
+            
             label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
             label_y = y1 - 10 if y1 - 10 > 10 else y1 + 20
             cv2.rectangle(display_frame, (x1, label_y - label_size[1] - 5), 

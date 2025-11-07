@@ -3,7 +3,6 @@ GUI components: TopBar, BottomBar, SOSDialog.
 """
 
 import platform
-import os
 from datetime import datetime
 
 try:
@@ -17,13 +16,6 @@ from PySide6.QtWidgets import (
     QComboBox, QSpinBox, QDialog, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QTimer
-
-# Import V4L2 detection function
-try:
-    from ..detection.engine import detect_v4l2_devices
-    HAS_V4L2_DETECTION = True
-except ImportError:
-    HAS_V4L2_DETECTION = False
 
 
 class SOSDialog(QDialog):
@@ -183,58 +175,12 @@ class BottomBar(QWidget):
         # Video Source Selector
         layout.addWidget(QLabel("Video Source:"))
         self.video_source_combo = QComboBox()
-        self._populate_video_sources()
+        # Add common camera sources
+        self.video_source_combo.addItems(["0", "1", "2", "/dev/video0", "/dev/video1", "/dev/video2"])
         self.video_source_combo.setEditable(True)  # Allow custom input
+        self.video_source_combo.setCurrentText("0")
         self.video_source_combo.setMinimumWidth(120)
         layout.addWidget(self.video_source_combo)
-    
-    def _populate_video_sources(self):
-        """Populate video source combo box with available cameras."""
-        self.video_source_combo.clear()
-        
-        # Detect platform
-        is_linux = platform.system() == "Linux"
-        
-        # On Linux/Raspberry Pi, try to detect V4L2 devices
-        if is_linux and HAS_V4L2_DETECTION:
-            try:
-                v4l2_devices = detect_v4l2_devices()
-                if v4l2_devices:
-                    # Add V4L2 devices with descriptive names
-                    for device in v4l2_devices:
-                        display_name = f"{device['path']} ({device['name']})"
-                        self.video_source_combo.addItem(display_name, device['path'])
-                    # Also add numeric indices for compatibility
-                    for i in range(len(v4l2_devices)):
-                        self.video_source_combo.addItem(str(i), str(i))
-                    # Set default to first V4L2 device
-                    if v4l2_devices:
-                        self.video_source_combo.setCurrentIndex(0)
-                    return
-            except Exception as e:
-                print(f"Error detecting V4L2 devices: {e}")
-        
-        # Fallback: Add common camera sources
-        if is_linux:
-            # Linux: Add /dev/video* devices
-            sources = []
-            for i in range(3):
-                device_path = f"/dev/video{i}"
-                if os.path.exists(device_path):
-                    sources.append(device_path)
-                sources.append(str(i))  # Also add numeric index
-            
-            if sources:
-                self.video_source_combo.addItems(sources)
-                self.video_source_combo.setCurrentText(sources[0] if sources[0].startswith("/dev/") else "0")
-            else:
-                # No devices found, add defaults
-                self.video_source_combo.addItems(["0", "1", "2", "/dev/video0", "/dev/video1", "/dev/video2"])
-                self.video_source_combo.setCurrentText("0")
-        else:
-            # Windows/other platforms: numeric indices only
-            self.video_source_combo.addItems(["0", "1", "2"])
-            self.video_source_combo.setCurrentText("0")
         
         # Resolution Selector
         layout.addWidget(QLabel("Resolution:"))
@@ -324,13 +270,4 @@ class BottomBar(QWidget):
                 except:
                     pass
         return None, None  # Use camera default
-    
-    def refresh_video_sources(self):
-        """Refresh the list of available video sources."""
-        current_text = self.video_source_combo.currentText()
-        self._populate_video_sources()
-        # Try to restore previous selection
-        index = self.video_source_combo.findText(current_text)
-        if index >= 0:
-            self.video_source_combo.setCurrentIndex(index)
 

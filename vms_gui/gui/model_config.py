@@ -5,18 +5,22 @@ Model configuration panel component.
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QGroupBox, QScrollArea, QDoubleSpinBox, QComboBox
+    QCheckBox, QGroupBox, QScrollArea, QDoubleSpinBox, QComboBox, QSpinBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 
 class ModelConfigPanel(QWidget):
     """Left sidebar with model configuration."""
+    # Signal emitted when SOS settings change
+    sos_settings_changed = Signal(dict)
+    
     def __init__(self, detection_engine, parent=None):
         super().__init__(parent)
         self.detection_engine = detection_engine
         self.selected_models = set()  # Track multiple selected models
         self.model_checkboxes = {}  # Store checkboxes for models
+        self.recognition_active = False  # Track if recognition model is active
         self.setup_ui()
         self.load_models()
     
@@ -123,6 +127,33 @@ class ModelConfigPanel(QWidget):
         self.enable_checkbox = QCheckBox("Enable Detection")
         self.enable_checkbox.stateChanged.connect(self.on_enable_changed)
         layout.addWidget(self.enable_checkbox)
+        
+        # SOS Configuration - Dynamic based on selected models
+        self.sos_group = QGroupBox("SOS Configuration")
+        self.sos_layout = QVBoxLayout(self.sos_group)
+        
+        # Container for SOS options (will be updated dynamically)
+        self.sos_content_widget = QWidget()
+        self.sos_content_layout = QVBoxLayout(self.sos_content_widget)
+        self.sos_content_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Scroll area for SOS options
+        sos_scroll = QScrollArea()
+        sos_scroll.setWidget(self.sos_content_widget)
+        sos_scroll.setWidgetResizable(True)
+        sos_scroll.setMaximumHeight(200)
+        self.sos_layout.addWidget(sos_scroll)
+        
+        # SOS widgets storage
+        self.sos_unknown_face_checkbox = None
+        self.sos_count_spin = None
+        self.sos_class_checkboxes = {}  # {class_name: checkbox}
+        self.sos_class_counts = {}  # {class_name: spinbox}
+        
+        layout.addWidget(self.sos_group)
+        
+        # Initially hide SOS group
+        self.sos_group.setVisible(False)
         
         layout.addStretch()
     
@@ -234,6 +265,14 @@ class ModelConfigPanel(QWidget):
             all_classes.update(classes)
             model_info[model_name] = classes
         
+        # Add "face" class if any model detects faces
+        if "face" in all_classes:
+            all_classes.add("face")
+        
+        # Add "unknown face" class if recognition is active
+        if self.recognition_active:
+            all_classes.add("unknown face")
+        
         # Sort classes for consistent display
         sorted_classes = sorted(all_classes)
         
@@ -241,10 +280,16 @@ class ModelConfigPanel(QWidget):
         models_text = ", ".join(self.selected_models)
         self.class_label.setText(f"Classes from {len(self.selected_models)} model(s): {len(sorted_classes)} available")
         
-        # Create checkboxes for each class (all unchecked initially)
+        # Create checkboxes for each class
         for class_name in sorted_classes:
             checkbox = QCheckBox(class_name)
-            checkbox.setChecked(False)  # Start unchecked as requested
+            
+            # Auto-enable "unknown face" if recognition is active
+            if class_name == "unknown face" and self.recognition_active:
+                checkbox.setChecked(True)
+            else:
+                checkbox.setChecked(False)
+            
             checkbox.stateChanged.connect(self.on_class_changed)
             self.class_checkboxes[class_name] = checkbox
             self.class_layout.addWidget(checkbox)
@@ -252,6 +297,8 @@ class ModelConfigPanel(QWidget):
         # Update all selected models' configs
         self.update_all_model_configs()
         self.update_class_count_label()
+        # Update SOS configuration display
+        self.update_sos_display()
     
     def update_all_model_configs(self):
         """Update configuration for all selected models."""
@@ -308,6 +355,12 @@ class ModelConfigPanel(QWidget):
         """Handle recognition model selection."""
         if text == "-- None --":
             self.recognition_status_label.setText("No recognition model selected")
+            self.detection_engine.clear_recognition_model()
+            self.recognition_active = False
+            # Update class display to remove "unknown face" if it exists
+            self.update_class_display()
+            # Update SOS display
+            self.update_sos_display()
             return
         
         # Get model file path from combo box data
@@ -315,8 +368,178 @@ class ModelConfigPanel(QWidget):
         model_file = self.recognition_combo.itemData(model_index)
         
         if model_file:
-            self.recognition_status_label.setText(f"Recognition model: {text}\n(Embedding extractor - no classes)")
-            print(f"Recognition model selected: {text} ({model_file})")
-            # Note: We're not loading it into detection engine yet
-            # This is just for display/selection for now
+            # Load recognition model into detection engine
+            success = self.detection_engine.set_recognition_model(str(model_file))
+            if success:
+                self.recognition_status_label.setText(f"Recognition model: {text}\n(Active - will recognize faces)")
+                print(f"Recognition model loaded: {text} ({model_file})")
+                self.recognition_active = True
+                # Update class display to add "unknown face" and auto-enable it
+                self.update_class_display()
+                # Update SOS display
+                self.update_sos_display()
+            else:
+                self.recognition_status_label.setText(f"Recognition model: {text}\n(Error loading model)")
+                print(f"Failed to load recognition model: {text}")
+                self.recognition_active = False
+                # Update SOS display
+                self.update_sos_display()
+    
+    def update_sos_display(self):
+        """Update SOS configuration display based on selected models."""
+        # Clear existing SOS widgets
+        while self.sos_content_layout.count():
+            child = self.sos_content_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        self.sos_unknown_face_checkbox = None
+        self.sos_count_spin = None
+        self.sos_class_checkboxes.clear()
+        self.sos_class_counts.clear()
+        
+        # Check if "best" model is selected and recognition is active
+        has_best_model = "best" in self.selected_models
+        has_other_models = len(self.selected_models) > 0 and not (len(self.selected_models) == 1 and "best" in self.selected_models)
+        
+        if has_best_model and self.recognition_active:
+            # Show "Set SOS for unknown faces" option
+            self.sos_group.setVisible(True)
+            
+            checkbox = QCheckBox("Set SOS for unknown faces")
+            checkbox.stateChanged.connect(self.on_sos_settings_changed)
+            self.sos_unknown_face_checkbox = checkbox
+            self.sos_content_layout.addWidget(checkbox)
+            
+            # Count spinbox
+            count_layout = QHBoxLayout()
+            count_layout.addWidget(QLabel("Trigger SOS after:"))
+            spinbox = QSpinBox()
+            spinbox.setRange(1, 100)
+            spinbox.setValue(1)
+            spinbox.valueChanged.connect(self.on_sos_settings_changed)
+            self.sos_count_spin = spinbox
+            count_layout.addWidget(spinbox)
+            count_layout.addWidget(QLabel("unknown face(s)"))
+            
+            count_widget = QWidget()
+            count_widget.setLayout(count_layout)
+            self.sos_content_layout.addWidget(count_widget)
+            
+        elif has_other_models or (has_best_model and not self.recognition_active):
+            # Show class checkboxes for all classes
+            self.sos_group.setVisible(True)
+            
+            # Get all available classes
+            all_classes = set()
+            for model_name in self.selected_models:
+                classes = self.detection_engine.get_model_classes(model_name)
+                all_classes.update(classes)
+            
+            # Add "face" if any model detects faces
+            if "face" in all_classes:
+                all_classes.add("face")
+            
+            # Add "unknown face" if recognition is active
+            if self.recognition_active:
+                all_classes.add("unknown face")
+            
+            if len(all_classes) > 0:
+                label = QLabel("Select classes to trigger SOS:")
+                self.sos_content_layout.addWidget(label)
+                
+                # Sort classes for consistent display
+                sorted_classes = sorted(all_classes)
+                
+                # Create checkbox and count spinbox for each class
+                for class_name in sorted_classes:
+                    class_widget = QWidget()
+                    class_widget_layout = QHBoxLayout(class_widget)
+                    class_widget_layout.setContentsMargins(0, 0, 0, 0)
+                    
+                    # Checkbox
+                    checkbox = QCheckBox(class_name)
+                    checkbox.stateChanged.connect(self.on_sos_settings_changed)
+                    self.sos_class_checkboxes[class_name] = checkbox
+                    class_widget_layout.addWidget(checkbox)
+                    
+                    # Count spinbox
+                    count_label = QLabel("Count:")
+                    count_label.setStyleSheet("font-size: 9px;")
+                    class_widget_layout.addWidget(count_label)
+                    
+                    spinbox = QSpinBox()
+                    spinbox.setRange(1, 100)
+                    spinbox.setValue(1)
+                    spinbox.setMaximumWidth(50)
+                    spinbox.valueChanged.connect(self.on_sos_settings_changed)
+                    self.sos_class_counts[class_name] = spinbox
+                    class_widget_layout.addWidget(spinbox)
+                    
+                    class_widget_layout.addStretch()
+                    self.sos_content_layout.addWidget(class_widget)
+            else:
+                label = QLabel("No classes available")
+                label.setStyleSheet("color: #666;")
+                self.sos_content_layout.addWidget(label)
+        else:
+            # No models selected or only best without recognition
+            self.sos_group.setVisible(False)
+        
+        # Emit initial settings
+        self.on_sos_settings_changed()
+    
+    def on_sos_settings_changed(self):
+        """Handle SOS settings change."""
+        settings = {}
+        
+        # Handle unknown face SOS (for best model + recognition)
+        if self.sos_unknown_face_checkbox and self.sos_count_spin:
+            settings = {
+                "sos_unknown_face_enabled": self.sos_unknown_face_checkbox.isChecked(),
+                "sos_unknown_face_count": self.sos_count_spin.value(),
+                "sos_known_face_enabled": False,
+                "sos_known_face_count": 1
+            }
+        else:
+            # Handle class-based SOS (for other models)
+            class_settings = {}
+            for class_name, checkbox in self.sos_class_checkboxes.items():
+                if checkbox.isChecked():
+                    count = self.sos_class_counts[class_name].value()
+                    class_settings[class_name] = count
+            
+            settings = {
+                "sos_unknown_face_enabled": False,
+                "sos_unknown_face_count": 1,
+                "sos_known_face_enabled": False,
+                "sos_known_face_count": 1,
+                "class_settings": class_settings
+            }
+        
+        self.sos_settings_changed.emit(settings)
+    
+    def get_sos_settings(self):
+        """Get current SOS settings."""
+        if self.sos_unknown_face_checkbox and self.sos_count_spin:
+            return {
+                "sos_unknown_face_enabled": self.sos_unknown_face_checkbox.isChecked(),
+                "sos_unknown_face_count": self.sos_count_spin.value(),
+                "sos_known_face_enabled": False,
+                "sos_known_face_count": 1
+            }
+        else:
+            class_settings = {}
+            for class_name, checkbox in self.sos_class_checkboxes.items():
+                if checkbox.isChecked():
+                    count = self.sos_class_counts[class_name].value()
+                    class_settings[class_name] = count
+            
+            return {
+                "sos_unknown_face_enabled": False,
+                "sos_unknown_face_count": 1,
+                "sos_known_face_enabled": False,
+                "sos_known_face_count": 1,
+                "class_settings": class_settings
+            }
 
