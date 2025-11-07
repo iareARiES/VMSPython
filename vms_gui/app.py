@@ -65,6 +65,8 @@ class VMSClientApp(QMainWindow):
         self.bottom_bar.stop_btn.clicked.connect(self.stop_detection)
         self.bottom_bar.stop_all_btn.clicked.connect(self.stop_all)
         self.bottom_bar.refresh_btn.clicked.connect(self.refresh_models)
+        # Also refresh video sources when refresh button is clicked (double-click or separate action)
+        # For now, we'll add a separate method that can be called
         self.bottom_bar.video_source_combo.currentTextChanged.connect(self.on_video_source_changed)
         self.bottom_bar.resolution_combo.currentTextChanged.connect(self.bottom_bar.on_resolution_changed)
         self.bottom_bar.resolution_combo.currentTextChanged.connect(self.on_resolution_changed_live)
@@ -75,9 +77,20 @@ class VMSClientApp(QMainWindow):
         """Test if a camera source is available."""
         test_cap = None
         try:
-            if isinstance(source, str) and source.isdigit():
+            import platform
+            is_linux = platform.system() == "Linux"
+            
+            source_str = str(source)
+            if isinstance(source, str) and source_str.isdigit():
                 source = int(source)
-            if isinstance(source, int):
+            
+            # On Linux, try V4L2 backend for /dev/video* devices
+            if isinstance(source, str) and source_str.startswith("/dev/video") and is_linux:
+                if hasattr(cv2, 'CAP_V4L2'):
+                    test_cap = cv2.VideoCapture(source_str, cv2.CAP_V4L2)
+                else:
+                    test_cap = cv2.VideoCapture(source_str)
+            elif isinstance(source, int):
                 test_cap = cv2.VideoCapture(source)
             else:
                 test_cap = cv2.VideoCapture(str(source))
@@ -99,20 +112,28 @@ class VMSClientApp(QMainWindow):
         # Get selected video source
         source_text = self.bottom_bar.video_source_combo.currentText().strip()
         
-        # Parse source
-        try:
-            if source_text.isdigit():
-                source = int(source_text)
-            elif source_text.startswith("/dev/video"):
-                source = source_text
-            else:
-                # Try as integer first
-                try:
+        # Check if combo box has user data (V4L2 device path)
+        current_data = self.bottom_bar.video_source_combo.currentData()
+        if current_data:
+            source = current_data
+        else:
+            # Parse source from text
+            try:
+                if source_text.isdigit():
                     source = int(source_text)
-                except:
+                elif source_text.startswith("/dev/video"):
                     source = source_text
-        except:
-            source = 0
+                elif "(" in source_text and "/dev/video" in source_text:
+                    # Extract device path from display name like "/dev/video0 (Camera Name)"
+                    source = source_text.split("(")[0].strip()
+                else:
+                    # Try as integer first
+                    try:
+                        source = int(source_text)
+                    except:
+                        source = source_text
+            except:
+                source = 0
         
         # Test camera before attempting to open
         print(f"Testing camera source: {source}")

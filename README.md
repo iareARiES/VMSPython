@@ -271,10 +271,29 @@ pkill -f "uvicorn.*app.main"
 3. Zone-based filtering and alerts
 
 ### **Camera Sources**
-- **V4L2:** `/dev/video0`, `/dev/video1`
+- **V4L2 (Linux/Raspberry Pi):** `/dev/video0`, `/dev/video1` - Automatically detected and listed in GUI
 - **USB:** Camera index `0`, `1`, `2`
 - **Files:** `/path/to/video.mp4`
 - **IP Cameras:** `rtsp://camera.ip/stream`
+
+### **Raspberry Pi V4L2 Support**
+The application includes enhanced V4L2 support for Raspberry Pi:
+- **Automatic device detection:** V4L2 devices are automatically detected and listed in the video source dropdown
+- **Optimized performance:** Uses MJPEG format when available for hardware acceleration
+- **Device information:** Shows camera names from v4l2-ctl when available
+- **Fallback support:** Gracefully falls back to default backend if V4L2 is unavailable
+
+**Optional V4L2 utilities (for better device info):**
+```bash
+# Install v4l2-utils (optional, for enhanced device detection)
+sudo apt install v4l-utils
+
+# List available V4L2 devices
+v4l2-ctl --list-devices
+
+# Check camera capabilities
+v4l2-ctl --device=/dev/video0 --all
+```
 
 ## 📊 **Performance**
 
