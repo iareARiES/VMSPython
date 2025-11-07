@@ -1,0 +1,69 @@
+# Complete Python Requirements for PythonOnly Standalone Operation
+# This includes ALL dependencies for GUI, Backend, and Detection Service
+# Install with: pip install -r requirements.txt
+
+# ===== WEB FRAMEWORK & API =====
+fastapi>=0.104.0          # FastAPI web framework
+uvicorn[standard]>=0.24.0 # ASGI server with standard dependencies
+websockets>=12.0          # WebSocket support
+
+# ===== DATABASE =====
+sqlalchemy>=2.0.0         # SQL toolkit and ORM
+# sqlite3 is built into Python - no separate package needed
+
+# ===== DATA VALIDATION =====
+pydantic>=2.5.0           # Data validation and settings
+pydantic-settings>=2.1.0  # Settings management
+
+# ===== HTTP & NETWORKING =====
+httpx>=0.25.0             # Async HTTP client
+requests>=2.31.0          # HTTP requests library
+websocket-client>=1.6.0   # WebSocket client
+python-multipart>=0.0.6   # Multipart form data support
+
+# ===== FILE HANDLING =====
+aiofiles>=23.2.0          # Async file operations
+python-dotenv>=1.0.0      # Environment variable support
+
+# ===== SECURITY =====
+python-jose[cryptography]>=3.3.0  # JWT token handling
+passlib[bcrypt]>=1.7.4             # Password hashing
+
+# ===== COMPUTER VISION & AI =====
+opencv-python>=4.8.0      # Computer vision library
+onnxruntime>=1.16.0       # ONNX Runtime for AI inference
+numpy>=1.24.0             # Numerical computing
+Pillow>=10.0.0            # Image processing
+
+# ===== GUI FRAMEWORK =====
+PySide6>=6.6.0            # Qt6 framework for modern GUI
+# Additional GUI enhancements:
+# qdarkstyle>=3.2.0        # Dark theme for Qt (optional)
+
+# ===== SYSTEM MONITORING =====
+psutil>=5.9.0             # System and process utilities
+
+# ===== DEVELOPMENT TOOLS (Optional) =====
+# Uncomment these for development:
+# pytest>=7.4.0           # Testing framework
+# black>=23.0.0           # Code formatting
+# flake8>=6.0.0           # Code linting
+
+# ===== PLATFORM-SPECIFIC NOTES =====
+# 
+# Raspberry Pi (Linux):
+# - May need: sudo apt install python3-pyside6 qt6-base-dev
+# - For camera: sudo apt install v4l-utils
+# - For OpenCV: sudo apt install libopencv-dev python3-opencv
+#
+# Windows:
+# - All packages should install via pip
+# - PySide6 includes all Qt dependencies
+#
+# macOS:
+# - All packages install via pip
+# - PySide6 includes all Qt dependencies
+
+# ===== TOTAL PACKAGE COUNT =====
+# This requirements.txt includes approximately 15+ packages
+# covering all functionality for the standalone application
