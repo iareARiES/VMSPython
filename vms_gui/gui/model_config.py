@@ -3,9 +3,11 @@ Model configuration panel component.
 """
 
 from pathlib import Path
+import shutil
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QGroupBox, QScrollArea, QDoubleSpinBox, QComboBox, QSpinBox
+    QCheckBox, QGroupBox, QScrollArea, QDoubleSpinBox, QComboBox, QSpinBox,
+    QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -47,6 +49,11 @@ class ModelConfigPanel(QWidget):
         model_scroll.setWidgetResizable(True)
         model_scroll.setMaximumHeight(150)
         model_layout.addWidget(model_scroll)
+        
+        # Add New Model button
+        add_model_btn = QPushButton("➕ Add New Model")
+        add_model_btn.clicked.connect(self.add_new_model)
+        model_layout.addWidget(add_model_btn)
         
         # Select All / Deselect All buttons
         model_buttons_layout = QHBoxLayout()
@@ -218,6 +225,106 @@ class ModelConfigPanel(QWidget):
         
         # Update class display
         self.update_class_display()
+    
+    def add_new_model(self):
+        """Add a new detection model from file dialog."""
+        # Open file dialog to select ONNX model
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Detection Model",
+            "",
+            "ONNX Model Files (*.onnx);;All Files (*)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+        
+        original_model_file = Path(file_path)
+        
+        # Ensure models directory exists and copy the model there so it is stored with other models
+        models_dir = Path("models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = models_dir / original_model_file.name
+        
+        try:
+            if not dest_file.exists():
+                shutil.copy2(str(original_model_file), str(dest_file))
+            # Use the file stored in models directory from now on
+            model_file = dest_file
+        except Exception as e:
+            # If copy fails, fall back to using the original path
+            QMessageBox.warning(
+                self,
+                "Model Copy Warning",
+                "Could not copy model to the 'models' directory.\n"
+                f"Using original file location instead.\n\nDetails:\n{str(e)}"
+            )
+            model_file = original_model_file
+        
+        model_name = model_file.stem  # Name without extension
+        
+        # Check if model already exists
+        if model_name in self.model_checkboxes:
+            QMessageBox.warning(
+                self,
+                "Model Already Exists",
+                f"Model '{model_name}' is already loaded. Please choose a different model."
+            )
+            return
+        
+        # Check if it's a recognition/embedding model
+        if "w600k" in model_name.lower() or "mbf" in model_name.lower():
+            QMessageBox.information(
+                self,
+                "Recognition Model",
+                f"'{model_name}' appears to be a recognition/embedding model.\n"
+                "Please use the Recognition Model section to add it."
+            )
+            return
+        
+        # Determine model type from filename
+        model_type = "coco"
+        if "face" in model_name.lower() or model_name.lower() == "best":
+            model_type = "face"
+        elif "fire" in model_name.lower() or "smoke" in model_name.lower():
+            model_type = "fire"
+        
+        # Load detection model into engine
+        try:
+            self.detection_engine.load_model(model_name, str(model_file), model_type)
+            
+            # Get detected classes from the model
+            detected_classes = self.detection_engine.get_model_classes(model_name)
+            
+            # Create checkbox for this model
+            checkbox = QCheckBox(model_name)
+            checkbox.setChecked(False)  # Start unchecked
+            # Use a lambda with default argument to capture model_name correctly
+            def make_handler(name):
+                return lambda checked: self.on_model_checkbox_changed(name, checked)
+            checkbox.stateChanged.connect(make_handler(model_name))
+            self.model_checkboxes[model_name] = checkbox
+            self.model_list_layout.addWidget(checkbox)
+            
+            # Show success message with detected classes
+            classes_text = ", ".join(detected_classes) if detected_classes else "No classes detected"
+            QMessageBox.information(
+                self,
+                "Model Added Successfully",
+                f"Model '{model_name}' has been added successfully.\n\n"
+                f"Detected classes ({len(detected_classes)}):\n{classes_text}"
+            )
+            
+            # Update class display
+            self.update_class_display()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Model",
+                f"Failed to load model '{model_name}':\n{str(e)}"
+            )
+            print(f"Failed to load model {model_name}: {e}")
     
     def on_model_checkbox_changed(self, model_name, checked):
         """Handle model checkbox change."""

@@ -6,8 +6,10 @@ import cv2
 import numpy as np
 import platform
 import time
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from datetime import datetime
 
 # ONNX Runtime
 try:
@@ -39,7 +41,7 @@ def detect_model_classes(model_path):
     
     model_name = Path(model_path).stem.lower()
     
-    # Method 1: Check filename FIRST for specific model types (face, fire, etc.)
+    # Method 1: Check filename FIRST for specific model types (face, fire, gold, etc.)
     # This takes priority to avoid false positives from test inference
     if "face" in model_name or model_name == "best":
         # "best.onnx" is a face detection model
@@ -48,6 +50,16 @@ def detect_model_classes(model_path):
     elif "fire" in model_name or "smoke" in model_name:
         print(f"Detected fire/smoke model from filename: {Path(model_path).name}")
         return ["fire", "smoke"]
+    elif "gold" in model_name:
+        # Custom Gold jewelry detection model with fixed classes
+        print(f"Detected gold jewelry model from filename: {Path(model_path).name}")
+        return [
+            "Bangle", "Earring", "Gold", "GoldCoin", "Ring",
+            "anklet", "armlet", "bangle", "bar", "bracelet",
+            "chain", "coin", "earrings", "head chain", "headpendant",
+            "necklace", "nosepinring", "objects", "ring", "toe ring",
+            "waist belt",
+        ]
     
     try:
         # Create a temporary session to inspect the model
@@ -409,6 +421,15 @@ class DetectionEngine:
         self.current_detections = []
         self.face_recognizer = None  # Face recognition model
         self.recognition_model_path = None
+        
+        # Gold model recording state
+        self.gold_recording = False
+        self.gold_video_writer = None
+        self.gold_recording_start_time = None
+        self.gold_last_detection_time = None
+        self.gold_recording_duration = 10.0  # Record for 10 seconds after last detection
+        self.gold_video_path = None
+        self.gold_temp_avi_path = None  # Temporary AVI file before MP4 conversion
     
     def load_model(self, model_name, model_path, model_type="coco"):
         """Load ONNX model."""
@@ -451,6 +472,9 @@ class DetectionEngine:
     def stop_capture(self):
         """Stop video capture."""
         self.running = False
+        # Stop Gold recording if active
+        if self.gold_recording:
+            self._stop_gold_recording()
         if self.capture:
             self.capture.release()
             self.capture = None
@@ -497,6 +521,13 @@ class DetectionEngine:
             return None, []
         
         all_detections = []
+        gold_classes = {
+            "Bangle", "Earring", "Gold", "GoldCoin", "Ring",
+            "anklet", "armlet", "bangle", "bar", "bracelet",
+            "chain", "coin", "earrings", "head chain", "headpendant",
+            "necklace", "nosepinring", "objects", "ring", "toe ring",
+            "waist belt",
+        }
         for model_name, config in self.model_configs.items():
             if not config["enabled"] or model_name not in self.models:
                 continue
@@ -513,6 +544,9 @@ class DetectionEngine:
                 # If no classes specified, allow all; otherwise check enabled_classes
                 if enabled_classes and not enabled_classes.get(cls_name, False):
                     continue
+                # For Gold model, collapse all jewelry classes into a single "Gold" label
+                if "gold" in model_name.lower() and cls_name in gold_classes:
+                    det["class"] = "Gold"
                 det["model"] = model_name
                 all_detections.append(det)
         
@@ -568,7 +602,223 @@ class DetectionEngine:
                 all_detections = [d for d in all_detections 
                                  if not (d.get("class") == "face" and d.get("recognized_name") != "Unknown")]
         
+        # Handle Gold model recording
+        self._handle_gold_recording(frame, all_detections)
+        
         self.current_frame = frame
         self.current_detections = all_detections
         return frame, all_detections
+    
+    def _handle_gold_recording(self, frame, detections):
+        """Handle automatic recording when Gold model detects objects."""
+        # Check if Gold model is enabled
+        gold_model_enabled = False
+        for model_name, config in self.model_configs.items():
+            if "gold" in model_name.lower() and config.get("enabled", False):
+                gold_model_enabled = True
+                break
+        
+        if not gold_model_enabled:
+            # Stop recording if Gold model is disabled
+            if self.gold_recording:
+                self._stop_gold_recording()
+            return
+        
+        # Check if Gold model has detections
+        gold_detected = False
+        for det in detections:
+            if "gold" in det.get("model", "").lower():
+                gold_detected = True
+                break
+        
+        current_time = time.time()
+        
+        if gold_detected:
+            # Update last detection time
+            self.gold_last_detection_time = current_time
+            
+            # Start recording if not already recording
+            if not self.gold_recording:
+                self._start_gold_recording(frame)
+        
+        # Continue recording if active
+        if self.gold_recording:
+            # Write frame to video
+            if self.gold_video_writer is not None:
+                try:
+                    self.gold_video_writer.write(frame)
+                except Exception as e:
+                    print(f"Error writing frame to Gold recording: {e}")
+            
+            # Stop recording if no detections for specified duration
+            if self.gold_last_detection_time is not None:
+                time_since_last_detection = current_time - self.gold_last_detection_time
+                if time_since_last_detection >= self.gold_recording_duration:
+                    self._stop_gold_recording()
+    
+    def _start_gold_recording(self, frame):
+        """Start recording video for Gold model detections."""
+        try:
+            # Create storage/videos directory if it doesn't exist
+            storage_dir = Path("storage/videos")
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Final MP4 file path
+            self.gold_video_path = storage_dir / f"gold_detection_{timestamp}.mp4"
+            # Temporary AVI file for recording (will be converted to MP4)
+            self.gold_temp_avi_path = storage_dir / f"gold_detection_{timestamp}_temp.avi"
+            
+            # Get frame dimensions
+            h, w = frame.shape[:2]
+            
+            # Get actual FPS from capture if available
+            fps = 30.0  # Default FPS
+            if self.capture and self.capture.cap:
+                try:
+                    actual_fps = self.capture.cap.get(cv2.CAP_PROP_FPS)
+                    if actual_fps > 0:
+                        fps = actual_fps
+                except:
+                    pass
+            
+            # Use XVID codec for temporary AVI file (will be converted to MP4)
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            
+            self.gold_video_writer = cv2.VideoWriter(
+                str(self.gold_temp_avi_path),
+                fourcc,
+                fps,
+                (w, h)
+            )
+            
+            if self.gold_video_writer.isOpened():
+                self.gold_recording = True
+                self.gold_recording_start_time = time.time()
+                print(f"Started Gold model recording (temporary AVI): {self.gold_temp_avi_path} ({w}x{h}, {fps:.1f} fps)")
+            else:
+                # Try alternative codec if XVID fails
+                print(f"XVID codec failed, trying MJPG...")
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                self.gold_video_writer = cv2.VideoWriter(
+                    str(self.gold_temp_avi_path),
+                    fourcc,
+                    fps,
+                    (w, h)
+                )
+                
+                if self.gold_video_writer.isOpened():
+                    self.gold_recording = True
+                    self.gold_recording_start_time = time.time()
+                    print(f"Started Gold model recording with MJPG (temporary AVI): {self.gold_temp_avi_path} ({w}x{h}, {fps:.1f} fps)")
+                else:
+                    print(f"Failed to open video writer for Gold recording with both codecs")
+                    self.gold_video_writer = None
+        except Exception as e:
+            print(f"Error starting Gold recording: {e}")
+            import traceback
+            traceback.print_exc()
+            self.gold_video_writer = None
+            self.gold_recording = False
+    
+    def _stop_gold_recording(self):
+        """Stop recording video for Gold model detections."""
+        if self.gold_video_writer is not None:
+            try:
+                # Ensure all frames are written
+                self.gold_video_writer.release()
+                duration = time.time() - self.gold_recording_start_time if self.gold_recording_start_time else 0
+                
+                # Convert AVI to MP4 using ffmpeg
+                if self.gold_temp_avi_path and self.gold_temp_avi_path.exists():
+                    self._convert_to_mp4(self.gold_temp_avi_path, self.gold_video_path)
+                    
+                    # Delete temporary AVI file after successful conversion
+                    if self.gold_video_path.exists():
+                        try:
+                            self.gold_temp_avi_path.unlink()
+                            print(f"Deleted temporary AVI file: {self.gold_temp_avi_path}")
+                        except Exception as e:
+                            print(f"Warning: Could not delete temporary file {self.gold_temp_avi_path}: {e}")
+                
+                if self.gold_video_path.exists():
+                    file_size = self.gold_video_path.stat().st_size / (1024 * 1024)
+                    print(f"Stopped Gold model recording: {self.gold_video_path}")
+                    print(f"  Duration: {duration:.1f}s, File size: {file_size:.2f} MB")
+                else:
+                    print(f"Warning: MP4 file was not created: {self.gold_video_path}")
+            except Exception as e:
+                print(f"Error stopping Gold recording: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                self.gold_video_writer = None
+                self.gold_recording = False
+                self.gold_recording_start_time = None
+                self.gold_last_detection_time = None
+                self.gold_video_path = None
+                self.gold_temp_avi_path = None
+    
+    def _convert_to_mp4(self, input_avi_path, output_mp4_path):
+        """Convert AVI video to H.264 MP4 format using ffmpeg."""
+        try:
+            print(f"Converting {input_avi_path.name} to MP4 format...")
+            
+            # Use ffmpeg to convert to H.264 MP4 (mobile-compatible)
+            # -c:v libx264: Use H.264 video codec
+            # -preset fast: Balance between speed and compression
+            # -crf 23: Good quality (lower = better quality, 18-28 is typical range)
+            # -pix_fmt yuv420p: Ensures compatibility with mobile players
+            # -an: No audio (video only)
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_avi_path),
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-an',  # No audio track
+                '-y',  # Overwrite output file if exists
+                str(output_mp4_path)
+            ]
+            
+            # Run ffmpeg conversion
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                print(f"Successfully converted to MP4: {output_mp4_path.name}")
+            else:
+                print(f"FFmpeg conversion failed: {result.stderr}")
+                # Try fallback: just copy/rename if ffmpeg fails
+                print("Attempting fallback conversion...")
+                try:
+                    import shutil
+                    shutil.copy2(input_avi_path, output_mp4_path)
+                    print(f"Copied AVI file as MP4 (may not be playable on mobile): {output_mp4_path.name}")
+                except Exception as e:
+                    print(f"Fallback also failed: {e}")
+        except FileNotFoundError:
+            print("Error: ffmpeg not found. Please install ffmpeg:")
+            print("  Ubuntu/Debian: sudo apt-get install ffmpeg")
+            print("  macOS: brew install ffmpeg")
+            print("  Windows: Download from https://ffmpeg.org/")
+            # Fallback: try to copy the file
+            try:
+                import shutil
+                shutil.copy2(input_avi_path, output_mp4_path)
+                print(f"Copied AVI file as MP4 (may not be playable on mobile): {output_mp4_path.name}")
+            except Exception as e:
+                print(f"Could not copy file: {e}")
+        except subprocess.TimeoutExpired:
+            print(f"FFmpeg conversion timed out after 5 minutes")
+        except Exception as e:
+            print(f"Error during MP4 conversion: {e}")
+            import traceback
+            traceback.print_exc()
 
