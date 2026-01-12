@@ -6,9 +6,10 @@ import cv2
 import numpy as np
 import platform
 import time
-import subprocess
+import signal
+import atexit
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 
 # ONNX Runtime
@@ -427,9 +428,40 @@ class DetectionEngine:
         self.gold_video_writer = None
         self.gold_recording_start_time = None
         self.gold_last_detection_time = None
-        self.gold_recording_duration = 10.0  # Record for 10 seconds after last detection
+        self.gold_recording_duration = 30.0  # Record for 30 seconds after last detection
         self.gold_video_path = None
-        self.gold_temp_avi_path = None  # Temporary AVI file before MP4 conversion
+        self.gold_recording_callback = None  # Callback for notifications: (event_type, message, video_path)
+        
+        # Register cleanup handlers for crashes
+        atexit.register(self._emergency_cleanup)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+    
+    def set_gold_recording_callback(self, callback: Optional[Callable[[str, str, Optional[Path]], None]]):
+        """Set callback function for Gold recording notifications.
+        
+        Args:
+            callback: Function that takes (event_type, message, video_path)
+                     event_type: "started" or "stopped"
+                     message: Notification message
+                     video_path: Path to video file (None for start)
+        """
+        self.gold_recording_callback = callback
+    
+    def _signal_handler(self, signum, frame):
+        """Handle system signals (SIGTERM, SIGINT) to save recording on crash."""
+        print(f"Received signal {signum}, saving Gold recording...")
+        self._emergency_cleanup()
+        raise SystemExit
+    
+    def _emergency_cleanup(self):
+        """Emergency cleanup to save recording on crash/exit."""
+        if self.gold_recording and self.gold_video_writer is not None:
+            try:
+                print("Emergency: Saving Gold recording before exit...")
+                self._stop_gold_recording()
+            except Exception as e:
+                print(f"Error during emergency cleanup: {e}")
     
     def load_model(self, model_name, model_path, model_type="coco"):
         """Load ONNX model."""
@@ -513,101 +545,120 @@ class DetectionEngine:
     
     def process_frame(self):
         """Process one frame with enabled models."""
-        if not self.capture or not self.running:
-            return None, []
-        
-        frame = self.capture.read()
-        if frame is None:
-            return None, []
-        
-        all_detections = []
-        gold_classes = {
-            "Bangle", "Earring", "Gold", "GoldCoin", "Ring",
-            "anklet", "armlet", "bangle", "bar", "bracelet",
-            "chain", "coin", "earrings", "head chain", "headpendant",
-            "necklace", "nosepinring", "objects", "ring", "toe ring",
-            "waist belt",
-        }
-        for model_name, config in self.model_configs.items():
-            if not config["enabled"] or model_name not in self.models:
-                continue
+        try:
+            if not self.capture or not self.running:
+                return None, []
             
-            runner = self.models[model_name]
-            conf_threshold = config.get("conf", 0.35)
-            enabled_classes = config.get("enabled_classes", {})
+            frame = self.capture.read()
+            if frame is None:
+                return None, []
             
-            detections = runner.infer(frame, conf_threshold)
-            
-            # Filter by enabled classes
-            for det in detections:
-                cls_name = det["class"]
-                # If no classes specified, allow all; otherwise check enabled_classes
-                if enabled_classes and not enabled_classes.get(cls_name, False):
+            all_detections = []
+            gold_classes = {
+                "Bangle", "Earring", "Gold", "GoldCoin", "Ring",
+                "anklet", "armlet", "bangle", "bar", "bracelet",
+                "chain", "coin", "earrings", "head chain", "headpendant",
+                "necklace", "nosepinring", "objects", "ring", "toe ring",
+                "waist belt",
+            }
+            for model_name, config in self.model_configs.items():
+                if not config["enabled"] or model_name not in self.models:
                     continue
-                # For Gold model, collapse all jewelry classes into a single "Gold" label
-                if "gold" in model_name.lower() and cls_name in gold_classes:
-                    det["class"] = "Gold"
-                det["model"] = model_name
-                all_detections.append(det)
-        
-        # Apply face recognition if recognizer is loaded and we have face detections
-        if self.face_recognizer and len(all_detections) > 0:
-            frame_h, frame_w = frame.shape[:2]
+                
+                runner = self.models[model_name]
+                conf_threshold = config.get("conf", 0.35)
+                enabled_classes = config.get("enabled_classes", {})
+                
+                detections = runner.infer(frame, conf_threshold)
+                
+                # Filter by enabled classes
+                for det in detections:
+                    cls_name = det["class"]
+                    # If no classes specified, allow all; otherwise check enabled_classes
+                    if enabled_classes and not enabled_classes.get(cls_name, False):
+                        continue
+                    # For Gold model, collapse all jewelry classes into a single "Gold" label
+                    if "gold" in model_name.lower() and cls_name in gold_classes:
+                        det["class"] = "Gold"
+                    det["model"] = model_name
+                    all_detections.append(det)
             
-            for det in all_detections:
-                # Only recognize "face" class detections
-                if det.get("class") == "face":
-                    x1, y1, x2, y2 = det["bbox"]
-                    
-                    # Ensure coordinates are within frame bounds
-                    x1 = max(0, min(x1, frame_w - 1))
-                    y1 = max(0, min(y1, frame_h - 1))
-                    x2 = max(x1 + 1, min(x2, frame_w))
-                    y2 = max(y1 + 1, min(y2, frame_h))
-                    
-                    # Extract face region
-                    face_roi = frame[y1:y2, x1:x2]
-                    
-                    if face_roi.size > 0 and face_roi.shape[0] > 10 and face_roi.shape[1] > 10:
-                        try:
-                            # Recognize face
-                            name, similarity = self.face_recognizer.recognize_face(face_roi)
-                            if name:
-                                det["recognized_name"] = name
-                                det["recognition_confidence"] = float(similarity)
-                            else:
-                                # Face detected but not recognized - mark as Unknown
+            # Apply face recognition if recognizer is loaded and we have face detections
+            if self.face_recognizer and len(all_detections) > 0:
+                frame_h, frame_w = frame.shape[:2]
+                
+                for det in all_detections:
+                    # Only recognize "face" class detections
+                    if det.get("class") == "face":
+                        x1, y1, x2, y2 = det["bbox"]
+                        
+                        # Ensure coordinates are within frame bounds
+                        x1 = max(0, min(x1, frame_w - 1))
+                        y1 = max(0, min(y1, frame_h - 1))
+                        x2 = max(x1 + 1, min(x2, frame_w))
+                        y2 = max(y1 + 1, min(y2, frame_h))
+                        
+                        # Extract face region
+                        face_roi = frame[y1:y2, x1:x2]
+                        
+                        if face_roi.size > 0 and face_roi.shape[0] > 10 and face_roi.shape[1] > 10:
+                            try:
+                                # Recognize face
+                                name, similarity = self.face_recognizer.recognize_face(face_roi)
+                                if name:
+                                    det["recognized_name"] = name
+                                    det["recognition_confidence"] = float(similarity)
+                                else:
+                                    # Face detected but not recognized - mark as Unknown
+                                    det["recognized_name"] = "Unknown"
+                                    det["recognition_confidence"] = float(similarity) if similarity > 0 else 0.0
+                            except Exception as e:
+                                # On error, mark as Unknown
                                 det["recognized_name"] = "Unknown"
-                                det["recognition_confidence"] = float(similarity) if similarity > 0 else 0.0
-                        except Exception as e:
-                            # On error, mark as Unknown
-                            det["recognized_name"] = "Unknown"
-                            det["recognition_confidence"] = 0.0
-        
-        # Handle "unknown face" class filtering after recognition
-        # This allows filtering unknown faces separately from regular face detections
-        if len(all_detections) > 0:
-            # Get enabled classes from any model config
-            enabled_classes = {}
-            for config in self.model_configs.values():
-                enabled_classes.update(config.get("enabled_classes", {}))
+                                det["recognition_confidence"] = 0.0
             
-            # Filter out unknown faces if "unknown face" class is not enabled
-            if enabled_classes and not enabled_classes.get("unknown face", True):
-                all_detections = [d for d in all_detections 
-                                 if not (d.get("class") == "face" and d.get("recognized_name") == "Unknown")]
+            # Handle "unknown face" class filtering after recognition
+            # This allows filtering unknown faces separately from regular face detections
+            if len(all_detections) > 0:
+                # Get enabled classes from any model config
+                enabled_classes = {}
+                for config in self.model_configs.values():
+                    enabled_classes.update(config.get("enabled_classes", {}))
+                
+                # Filter out unknown faces if "unknown face" class is not enabled
+                if enabled_classes and not enabled_classes.get("unknown face", True):
+                    all_detections = [d for d in all_detections 
+                                     if not (d.get("class") == "face" and d.get("recognized_name") == "Unknown")]
+                
+                # Filter out regular faces if only "unknown face" is enabled (and face is not enabled)
+                if enabled_classes and enabled_classes.get("unknown face", False) and not enabled_classes.get("face", True):
+                    all_detections = [d for d in all_detections 
+                                     if not (d.get("class") == "face" and d.get("recognized_name") != "Unknown")]
             
-            # Filter out regular faces if only "unknown face" is enabled (and face is not enabled)
-            if enabled_classes and enabled_classes.get("unknown face", False) and not enabled_classes.get("face", True):
-                all_detections = [d for d in all_detections 
-                                 if not (d.get("class") == "face" and d.get("recognized_name") != "Unknown")]
-        
-        # Handle Gold model recording
-        self._handle_gold_recording(frame, all_detections)
-        
-        self.current_frame = frame
-        self.current_detections = all_detections
-        return frame, all_detections
+            # Handle Gold model recording
+            try:
+                self._handle_gold_recording(frame, all_detections)
+            except Exception as e:
+                # On error during recording, save and continue
+                print(f"Error in Gold recording handling: {e}")
+                if self.gold_recording:
+                    try:
+                        self._stop_gold_recording()
+                    except:
+                        pass
+            
+            self.current_frame = frame
+            self.current_detections = all_detections
+            return frame, all_detections
+        except Exception as e:
+            # On any error, save recording if active (crash safety)
+            if self.gold_recording:
+                print(f"Error in process_frame, saving recording before crash: {e}")
+                try:
+                    self._stop_gold_recording()
+                except:
+                    pass
+            raise  # Re-raise to maintain existing error handling
     
     def _handle_gold_recording(self, frame, detections):
         """Handle automatic recording when Gold model detects objects."""
@@ -646,7 +697,19 @@ class DetectionEngine:
             # Write frame to video
             if self.gold_video_writer is not None:
                 try:
-                    self.gold_video_writer.write(frame)
+                    # Draw Gold detections on a copy before writing
+                    frame_to_write = frame.copy()
+                    for det in detections:
+                        if "gold" in det.get("model", "").lower():
+                            x1, y1, x2, y2 = det["bbox"]
+                            conf = det.get("confidence", 0.0)
+                            cls_name = det.get("class", "Gold")
+                            color = (0, 215, 255)  # Amber-ish for gold
+                            cv2.rectangle(frame_to_write, (x1, y1), (x2, y2), color, 2)
+                            label = f"{cls_name} {conf:.0%}"
+                            cv2.putText(frame_to_write, label, (x1, max(0, y1 - 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    self.gold_video_writer.write(frame_to_write)
                 except Exception as e:
                     print(f"Error writing frame to Gold recording: {e}")
             
@@ -665,10 +728,8 @@ class DetectionEngine:
             
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Final MP4 file path
-            self.gold_video_path = storage_dir / f"gold_detection_{timestamp}.mp4"
-            # Temporary AVI file for recording (will be converted to MP4)
-            self.gold_temp_avi_path = storage_dir / f"gold_detection_{timestamp}_temp.avi"
+            filename = f"gold_detection_{timestamp}.avi"  # Use .avi extension for better compatibility
+            self.gold_video_path = storage_dir / filename
             
             # Get frame dimensions
             h, w = frame.shape[:2]
@@ -683,11 +744,12 @@ class DetectionEngine:
                 except:
                     pass
             
-            # Use XVID codec for temporary AVI file (will be converted to MP4)
+            # Try multiple codecs for better compatibility
+            # XVID is widely compatible and works on most systems
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
             
             self.gold_video_writer = cv2.VideoWriter(
-                str(self.gold_temp_avi_path),
+                str(self.gold_video_path),
                 fourcc,
                 fps,
                 (w, h)
@@ -696,13 +758,22 @@ class DetectionEngine:
             if self.gold_video_writer.isOpened():
                 self.gold_recording = True
                 self.gold_recording_start_time = time.time()
-                print(f"Started Gold model recording (temporary AVI): {self.gold_temp_avi_path} ({w}x{h}, {fps:.1f} fps)")
+                message = f"Gold detection recording started\nFile: {self.gold_video_path.name}\nResolution: {w}x{h}, {fps:.1f} fps"
+                print(f"Started Gold model recording: {self.gold_video_path} ({w}x{h}, {fps:.1f} fps)")
+                # Notify via callback if set
+                if self.gold_recording_callback:
+                    try:
+                        self.gold_recording_callback("started", message, None)
+                    except Exception as e:
+                        print(f"Error in recording callback: {e}")
             else:
                 # Try alternative codec if XVID fails
                 print(f"XVID codec failed, trying MJPG...")
                 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                filename = f"gold_detection_{timestamp}.avi"
+                self.gold_video_path = storage_dir / filename
                 self.gold_video_writer = cv2.VideoWriter(
-                    str(self.gold_temp_avi_path),
+                    str(self.gold_video_path),
                     fourcc,
                     fps,
                     (w, h)
@@ -711,7 +782,14 @@ class DetectionEngine:
                 if self.gold_video_writer.isOpened():
                     self.gold_recording = True
                     self.gold_recording_start_time = time.time()
-                    print(f"Started Gold model recording with MJPG (temporary AVI): {self.gold_temp_avi_path} ({w}x{h}, {fps:.1f} fps)")
+                    message = f"Gold detection recording started\nFile: {self.gold_video_path.name}\nResolution: {w}x{h}, {fps:.1f} fps"
+                    print(f"Started Gold model recording with MJPG: {self.gold_video_path} ({w}x{h}, {fps:.1f} fps)")
+                    # Notify via callback if set
+                    if self.gold_recording_callback:
+                        try:
+                            self.gold_recording_callback("started", message, None)
+                        except Exception as e:
+                            print(f"Error in recording callback: {e}")
                 else:
                     print(f"Failed to open video writer for Gold recording with both codecs")
                     self.gold_video_writer = None
@@ -725,100 +803,36 @@ class DetectionEngine:
     def _stop_gold_recording(self):
         """Stop recording video for Gold model detections."""
         if self.gold_video_writer is not None:
+            video_path_saved = None
             try:
                 # Ensure all frames are written
                 self.gold_video_writer.release()
                 duration = time.time() - self.gold_recording_start_time if self.gold_recording_start_time else 0
-                
-                # Convert AVI to MP4 using ffmpeg
-                if self.gold_temp_avi_path and self.gold_temp_avi_path.exists():
-                    self._convert_to_mp4(self.gold_temp_avi_path, self.gold_video_path)
-                    
-                    # Delete temporary AVI file after successful conversion
-                    if self.gold_video_path.exists():
-                        try:
-                            self.gold_temp_avi_path.unlink()
-                            print(f"Deleted temporary AVI file: {self.gold_temp_avi_path}")
-                        except Exception as e:
-                            print(f"Warning: Could not delete temporary file {self.gold_temp_avi_path}: {e}")
-                
-                if self.gold_video_path.exists():
-                    file_size = self.gold_video_path.stat().st_size / (1024 * 1024)
-                    print(f"Stopped Gold model recording: {self.gold_video_path}")
-                    print(f"  Duration: {duration:.1f}s, File size: {file_size:.2f} MB")
-                else:
-                    print(f"Warning: MP4 file was not created: {self.gold_video_path}")
+                file_size = self.gold_video_path.stat().st_size / (1024 * 1024) if self.gold_video_path.exists() else 0
+                video_path_saved = self.gold_video_path
+                message = f"Gold detection recording stopped\nFile: {self.gold_video_path.name}\nDuration: {duration:.1f}s, Size: {file_size:.2f} MB"
+                print(f"Stopped Gold model recording: {self.gold_video_path}")
+                print(f"  Duration: {duration:.1f}s, File size: {file_size:.2f} MB")
+                # Notify via callback if set
+                if self.gold_recording_callback:
+                    try:
+                        self.gold_recording_callback("stopped", message, video_path_saved)
+                    except Exception as e:
+                        print(f"Error in recording callback: {e}")
             except Exception as e:
                 print(f"Error stopping Gold recording: {e}")
                 import traceback
                 traceback.print_exc()
+                # Still try to notify about error
+                if self.gold_recording_callback and video_path_saved:
+                    try:
+                        self.gold_recording_callback("stopped", f"Recording stopped (with errors)\nFile: {video_path_saved.name}", video_path_saved)
+                    except:
+                        pass
             finally:
                 self.gold_video_writer = None
                 self.gold_recording = False
                 self.gold_recording_start_time = None
                 self.gold_last_detection_time = None
                 self.gold_video_path = None
-                self.gold_temp_avi_path = None
-    
-    def _convert_to_mp4(self, input_avi_path, output_mp4_path):
-        """Convert AVI video to H.264 MP4 format using ffmpeg."""
-        try:
-            print(f"Converting {input_avi_path.name} to MP4 format...")
-            
-            # Use ffmpeg to convert to H.264 MP4 (mobile-compatible)
-            # -c:v libx264: Use H.264 video codec
-            # -preset fast: Balance between speed and compression
-            # -crf 23: Good quality (lower = better quality, 18-28 is typical range)
-            # -pix_fmt yuv420p: Ensures compatibility with mobile players
-            # -an: No audio (video only)
-            cmd = [
-                'ffmpeg',
-                '-i', str(input_avi_path),
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-an',  # No audio track
-                '-y',  # Overwrite output file if exists
-                str(output_mp4_path)
-            ]
-            
-            # Run ffmpeg conversion
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0:
-                print(f"Successfully converted to MP4: {output_mp4_path.name}")
-            else:
-                print(f"FFmpeg conversion failed: {result.stderr}")
-                # Try fallback: just copy/rename if ffmpeg fails
-                print("Attempting fallback conversion...")
-                try:
-                    import shutil
-                    shutil.copy2(input_avi_path, output_mp4_path)
-                    print(f"Copied AVI file as MP4 (may not be playable on mobile): {output_mp4_path.name}")
-                except Exception as e:
-                    print(f"Fallback also failed: {e}")
-        except FileNotFoundError:
-            print("Error: ffmpeg not found. Please install ffmpeg:")
-            print("  Ubuntu/Debian: sudo apt-get install ffmpeg")
-            print("  macOS: brew install ffmpeg")
-            print("  Windows: Download from https://ffmpeg.org/")
-            # Fallback: try to copy the file
-            try:
-                import shutil
-                shutil.copy2(input_avi_path, output_mp4_path)
-                print(f"Copied AVI file as MP4 (may not be playable on mobile): {output_mp4_path.name}")
-            except Exception as e:
-                print(f"Could not copy file: {e}")
-        except subprocess.TimeoutExpired:
-            print(f"FFmpeg conversion timed out after 5 minutes")
-        except Exception as e:
-            print(f"Error during MP4 conversion: {e}")
-            import traceback
-            traceback.print_exc()
 

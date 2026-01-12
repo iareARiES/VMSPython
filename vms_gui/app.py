@@ -25,6 +25,9 @@ class VMSClientApp(QMainWindow):
         # Initialize detection engine
         self.detection_engine = DetectionEngine()
         
+        # Set up Gold recording notifications callback
+        self.detection_engine.set_gold_recording_callback(self.on_gold_recording_event)
+        
         # Initialize detection database
         self.detection_db = DetectionDatabase()
         
@@ -648,8 +651,26 @@ class VMSClientApp(QMainWindow):
                     # Reset count after trigger
                     self.class_counts[class_name] = 0
     
+    def on_gold_recording_event(self, event_type, message, video_path):
+        """Handle Gold recording start/stop notifications."""
+        if event_type == "started":
+            QMessageBox.information(
+                self,
+                "Gold Detection Recording Started",
+                message
+            )
+        elif event_type == "stopped":
+            QMessageBox.information(
+                self,
+                "Gold Detection Recording Stopped",
+                message
+            )
+    
     def closeEvent(self, event):
         """Handle application close."""
+        # Ensure Gold recording is saved before closing
+        if self.detection_engine.gold_recording:
+            self.detection_engine._stop_gold_recording()
         self.detection_engine.stop_capture()
         if self.video_player:
             self.video_player.cleanup()
