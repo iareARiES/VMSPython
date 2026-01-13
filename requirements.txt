@@ -1,70 +1,104 @@
-# Complete Python Requirements for PythonOnly Standalone Operation
+# Complete Python Requirements for Raspberry Pi (ARM Architecture)
 # This includes ALL dependencies for GUI, Backend, and Detection Service
 # Install with: pip install -r requirements.txt
 
 # ===== WEB FRAMEWORK & API =====
-fastapi>=0.104.0          # FastAPI web framework
-uvicorn[standard]>=0.24.0 # ASGI server with standard dependencies
-websockets>=12.0          # WebSocket support
+fastapi>=0.104.0,<1.0.0          # FastAPI web framework
+uvicorn>=0.24.0,<1.0.0           # ASGI server (standard extras may cause issues on RPI)
+websockets>=12.0,<14.0          # WebSocket support
 
 # ===== DATABASE =====
-sqlalchemy>=2.0.0         # SQL toolkit and ORM
+sqlalchemy>=2.0.0,<3.0.0        # SQL toolkit and ORM
 # sqlite3 is built into Python - no separate package needed
 
 # ===== DATA VALIDATION =====
-pydantic>=2.5.0           # Data validation and settings
-pydantic-settings>=2.1.0  # Settings management
+pydantic>=2.5.0,<3.0.0          # Data validation and settings
+pydantic-settings>=2.1.0,<3.0.0 # Settings management
 
 # ===== HTTP & NETWORKING =====
-httpx>=0.25.0             # Async HTTP client
-requests>=2.31.0          # HTTP requests library
-websocket-client>=1.6.0   # WebSocket client
-python-multipart>=0.0.6   # Multipart form data support
+httpx>=0.25.0,<1.0.0           # Async HTTP client
+requests>=2.31.0,<3.0.0        # HTTP requests library
+websocket-client>=1.6.0,<2.0.0 # WebSocket client
+python-multipart>=0.0.6,<1.0.0 # Multipart form data support
 
 # ===== FILE HANDLING =====
-aiofiles>=23.2.0          # Async file operations
-python-dotenv>=1.0.0      # Environment variable support
+aiofiles>=23.2.0,<25.0.0       # Async file operations
+python-dotenv>=1.0.0,<2.0.0    # Environment variable support
 
 # ===== SECURITY =====
-python-jose[cryptography]>=3.3.0  # JWT token handling
-passlib[bcrypt]>=1.7.4             # Password hashing
+python-jose[cryptography]>=3.3.0,<4.0.0  # JWT token handling
+passlib[bcrypt]>=1.7.4,<2.0.0            # Password hashing
 
 # ===== COMPUTER VISION & AI =====
-opencv-python>=4.8.0      # Computer vision library
-onnxruntime>=1.16.0       # ONNX Runtime for AI inference
-numpy>=1.24.0             # Numerical computing
-Pillow>=10.0.0            # Image processing
-google-generativeai>=0.3.0 # Google Gemini API for query parsing (optional - fallback parser available)
+# OpenCV: Use headless version on RPI if GUI not needed, otherwise regular version
+# For RPI, opencv-python may take time to build - consider pre-built wheels
+opencv-python>=4.8.0,<5.0.0    # Computer vision library (ARM compatible)
+# Alternative for headless: opencv-python-headless>=4.8.0,<5.0.0
+
+# ONNX Runtime: Use CPU version for RPI (ARM compatible)
+# Note: onnxruntime 1.16+ has better ARM support
+onnxruntime>=1.16.0,<2.0.0     # ONNX Runtime for AI inference (CPU, ARM compatible)
+
+# NumPy: Use compatible version for ARM architecture
+numpy>=1.24.0,<2.0.0           # Numerical computing (ARM compatible)
+
+Pillow>=10.0.0,<11.0.0        # Image processing
+google-generativeai>=0.3.0,<1.0.0 # Google Gemini API for query parsing (optional - fallback parser available)
 
 # ===== GUI FRAMEWORK =====
-PySide6>=6.6.0            # Qt6 framework for modern GUI
+# PySide6: May require system dependencies on RPI
+# Install system deps first: sudo apt install python3-pyside6.qt6 qt6-base-dev
+PySide6>=6.6.0,<7.0.0          # Qt6 framework for modern GUI
 # Additional GUI enhancements:
-# qdarkstyle>=3.2.0        # Dark theme for Qt (optional)
+# qdarkstyle>=3.2.0,<4.0.0     # Dark theme for Qt (optional)
 
 # ===== SYSTEM MONITORING =====
-psutil>=5.9.0             # System and process utilities
+psutil>=5.9.0,<6.0.0           # System and process utilities
 
 # ===== DEVELOPMENT TOOLS (Optional) =====
 # Uncomment these for development:
-# pytest>=7.4.0           # Testing framework
-# black>=23.0.0           # Code formatting
-# flake8>=6.0.0           # Code linting
+# pytest>=7.4.0,<8.0.0        # Testing framework
+# black>=23.0.0,<25.0.0       # Code formatting
+# flake8>=6.0.0,<7.0.0        # Code linting
 
-# ===== PLATFORM-SPECIFIC NOTES =====
+# ===== RASPBERRY PI INSTALLATION NOTES =====
 # 
-# Raspberry Pi (Linux):
-# - May need: sudo apt install python3-pyside6 qt6-base-dev
-# - For camera: sudo apt install v4l-utils
-# - For OpenCV: sudo apt install libopencv-dev python3-opencv
+# 1. Install system dependencies first:
+#    sudo apt update
+#    sudo apt install -y python3-pip python3-venv python3-dev
+#    sudo apt install -y python3-pyside6.qt6 qt6-base-dev
+#    sudo apt install -y libopencv-dev python3-opencv
+#    sudo apt install -y v4l-utils  # For camera support
+#    sudo apt install -y libgl1-mesa-glx libglib2.0-0  # OpenGL support
 #
-# Windows:
-# - All packages should install via pip
-# - PySide6 includes all Qt dependencies
+# 2. Create virtual environment:
+#    python3 -m venv venv
+#    source venv/bin/activate
 #
-# macOS:
-# - All packages install via pip
-# - PySide6 includes all Qt dependencies
+# 3. Upgrade pip and install wheel:
+#    pip install --upgrade pip setuptools wheel
+#
+# 4. Install requirements (this may take 30-60 minutes on RPI):
+#    pip install -r requirements.txt
+#
+# 5. If opencv-python fails to install, try:
+#    pip install opencv-python-headless  # Lighter version without GUI features
+#
+# 6. If onnxruntime installation fails, try:
+#    pip install onnxruntime --no-cache-dir
+#
+# 7. For better performance on RPI 4/5, consider:
+#    - Using 64-bit OS (Raspberry Pi OS 64-bit)
+#    - Allocating more GPU memory if using GPU acceleration
+#    - Using lighter models or reducing input resolution
+#
+# ===== PERFORMANCE TIPS FOR RPI =====
+# - Use lower video resolution (640x480 or 320x240) for better FPS
+# - Reduce confidence thresholds to speed up processing
+# - Disable unused detection models
+# - Consider using opencv-python-headless if GUI features not needed
+# - Monitor CPU temperature: watch -n 1 vcgencmd measure_temp
 
 # ===== TOTAL PACKAGE COUNT =====
 # This requirements.txt includes approximately 15+ packages
-# covering all functionality for the standalone application
+# covering all functionality for the standalone application on Raspberry Pi
