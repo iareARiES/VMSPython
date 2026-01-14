@@ -431,6 +431,8 @@ class DetectionEngine:
         self.gold_recording_duration = 30.0  # Record for 30 seconds after last detection
         self.gold_video_path = None
         self.gold_recording_callback = None  # Callback for notifications: (event_type, message, video_path)
+        self.gold_recording_fps = 30.0  # FPS used for recording
+        self.gold_last_frame_write_time = None  # Track last frame write time for rate control
         
         # Register cleanup handlers for crashes
         atexit.register(self._emergency_cleanup)
@@ -694,22 +696,38 @@ class DetectionEngine:
         
         # Continue recording if active
         if self.gold_recording:
-            # Write frame to video
+            # Write frame to video at correct rate (not faster than FPS)
             if self.gold_video_writer is not None:
                 try:
-                    # Draw Gold detections on a copy before writing
-                    frame_to_write = frame.copy()
-                    for det in detections:
-                        if "gold" in det.get("model", "").lower():
-                            x1, y1, x2, y2 = det["bbox"]
-                            conf = det.get("confidence", 0.0)
-                            cls_name = det.get("class", "Gold")
-                            color = (0, 215, 255)  # Amber-ish for gold
-                            cv2.rectangle(frame_to_write, (x1, y1), (x2, y2), color, 2)
-                            label = f"{cls_name} {conf:.0%}"
-                            cv2.putText(frame_to_write, label, (x1, max(0, y1 - 10)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                    self.gold_video_writer.write(frame_to_write)
+                    # Calculate time since last frame write
+                    frame_interval = 1.0 / self.gold_recording_fps  # Time between frames in seconds
+                    should_write = False
+                    
+                    if self.gold_last_frame_write_time is None:
+                        # First frame - write immediately
+                        should_write = True
+                        self.gold_last_frame_write_time = current_time
+                    else:
+                        # Only write if enough time has passed based on FPS
+                        time_since_last_write = current_time - self.gold_last_frame_write_time
+                        if time_since_last_write >= frame_interval:
+                            should_write = True
+                            self.gold_last_frame_write_time = current_time
+                    
+                    if should_write:
+                        # Draw Gold detections on a copy before writing
+                        frame_to_write = frame.copy()
+                        for det in detections:
+                            if "gold" in det.get("model", "").lower():
+                                x1, y1, x2, y2 = det["bbox"]
+                                conf = det.get("confidence", 0.0)
+                                cls_name = det.get("class", "Gold")
+                                color = (0, 215, 255)  # Amber-ish for gold
+                                cv2.rectangle(frame_to_write, (x1, y1), (x2, y2), color, 2)
+                                label = f"{cls_name} {conf:.0%}"
+                                cv2.putText(frame_to_write, label, (x1, max(0, y1 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        self.gold_video_writer.write(frame_to_write)
                 except Exception as e:
                     print(f"Error writing frame to Gold recording: {e}")
             
@@ -735,12 +753,17 @@ class DetectionEngine:
             h, w = frame.shape[:2]
             
             # Get actual FPS from capture if available
-            fps = 30.0  # Default FPS
+            # For live camera feeds, CAP_PROP_FPS is often unreliable (returns 0 or incorrect values)
+            # So we use a reasonable default and validate any read value
+            fps = 30.0  # Default FPS for live camera feeds
             if self.capture and self.capture.cap:
                 try:
                     actual_fps = self.capture.cap.get(cv2.CAP_PROP_FPS)
-                    if actual_fps > 0:
+                    # Only use the read FPS if it's in a reasonable range (1-60 FPS)
+                    # This prevents using incorrect values that cause fast-forward playback
+                    if actual_fps and 1.0 <= actual_fps <= 60.0:
                         fps = actual_fps
+                    # If FPS is 0 or invalid, keep the default 30.0
                 except:
                     pass
             
@@ -758,6 +781,8 @@ class DetectionEngine:
             if self.gold_video_writer.isOpened():
                 self.gold_recording = True
                 self.gold_recording_start_time = time.time()
+                self.gold_recording_fps = fps  # Store FPS for frame rate control
+                self.gold_last_frame_write_time = None  # Reset frame timing
                 message = f"Gold detection recording started\nFile: {self.gold_video_path.name}\nResolution: {w}x{h}, {fps:.1f} fps"
                 print(f"Started Gold model recording: {self.gold_video_path} ({w}x{h}, {fps:.1f} fps)")
                 # Notify via callback if set
@@ -782,6 +807,8 @@ class DetectionEngine:
                 if self.gold_video_writer.isOpened():
                     self.gold_recording = True
                     self.gold_recording_start_time = time.time()
+                    self.gold_recording_fps = fps  # Store FPS for frame rate control
+                    self.gold_last_frame_write_time = None  # Reset frame timing
                     message = f"Gold detection recording started\nFile: {self.gold_video_path.name}\nResolution: {w}x{h}, {fps:.1f} fps"
                     print(f"Started Gold model recording with MJPG: {self.gold_video_path} ({w}x{h}, {fps:.1f} fps)")
                     # Notify via callback if set
@@ -813,6 +840,8 @@ class DetectionEngine:
                 message = f"Gold detection recording stopped\nFile: {self.gold_video_path.name}\nDuration: {duration:.1f}s, Size: {file_size:.2f} MB"
                 print(f"Stopped Gold model recording: {self.gold_video_path}")
                 print(f"  Duration: {duration:.1f}s, File size: {file_size:.2f} MB")
+                # Reset frame timing for next recording
+                self.gold_last_frame_write_time = None
                 # Notify via callback if set
                 if self.gold_recording_callback:
                     try:

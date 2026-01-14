@@ -116,7 +116,13 @@ class VideoPlayer(QWidget):
         
         # Get video properties
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
+        fps_read = self.cap.get(cv2.CAP_PROP_FPS)
+        # Validate FPS - ensure it's within reasonable range (1-120 FPS)
+        if fps_read and 1 <= fps_read <= 120:
+            self.fps = fps_read
+        else:
+            # Default to 30 FPS if FPS is invalid or out of range
+            self.fps = 30.0
         width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
@@ -303,8 +309,11 @@ class VideoPlayer(QWidget):
         self.is_paused = False
         self.play_btn.setText("⏸ Pause")
         
-        # Calculate interval based on fps
-        interval = int(1000 / self.fps)
+        # Calculate interval based on fps - ensure minimum 1ms and handle edge cases
+        if self.fps > 0:
+            interval = max(1, int(1000 / self.fps))
+        else:
+            interval = 33  # Default to ~30 FPS if fps is invalid
         self.play_timer.start(interval)
     
     def pause(self):
