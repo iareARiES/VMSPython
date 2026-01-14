@@ -767,6 +767,10 @@ class DetectionEngine:
                 except:
                     pass
             
+            # Record at 0.75x speed (slower playback) by reducing FPS
+            # This makes the video play back at 75% of original speed
+            fps = fps * 0.25
+            
             # Try multiple codecs for better compatibility
             # XVID is widely compatible and works on most systems
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
